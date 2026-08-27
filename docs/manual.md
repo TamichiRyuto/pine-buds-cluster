@@ -29,6 +29,7 @@ git clone https://github.com/TamichiRyuto/pine-buds-cluster.git
 cd pine-buds-cluster
 make test                          # まずホストでカーネルの単体テストが通ることを確認
 ./scripts/setup-openpinebuds.sh    # external/ に OpenPineBuds を clone + docker チェック
+./scripts/install-into-sdk.sh      # カーネル+アプリを apps/main/ へ配置し app_init にフック
 
 cd external/OpenPineBuds
 ./start_dev.sh    # 開発コンテナ起動 (初回は GCC 取得で 1〜3 分)
@@ -107,14 +108,100 @@ GEMM elapsed=<n> ms
 
 ## 8. 付録 A: リポジトリ構造マップ (Task 0 の成果)
 
-(調査結果を反映予定)
+OpenPineBuds (HEAD, shallow clone) の調査結果。パスは SDK ルート相対。
+
+### トップレベル構成
+
+| ディレクトリ | 役割 |
+|---|---|
+| `apps/` | アプリ層。`main/apps.cpp` が中心。`common/` にアプリスレッド/メールボックス |
+| `config/` | ボード別設定。有効ボードは `config/open_source/target.mk` |
+| `platform/` | `main/` (リセットベクタ + `main()`)、`hal/` (BES2300P HAL)、`cmsis/` |
+| `rtos/` | `rtx/` = CMSIS-RTOS v1 RTX (本ボードで使用)。FreeRTOS は不在 |
+| `services/` | BT/BLE スタック、audioflinger、IBRT (TWS)、OTA 等 |
+| `scripts/` | Kbuild 風ビルド基盤 (`build.mk`, `lib.mk`) と `link/` (リンカスクリプト) |
+| `out/open_source/` | ビルド成果物 (git 管理外) |
+
+### ビルド系
+
+- ビルド: `build.sh` → `make -j$(nproc) T=open_source DEBUG=1`
+- 成果物: `out/open_source/open_source.elf` / **`open_source.bin` (書き込み対象)** / `.map`
+- `download.sh` は `bestool write-image out/open_source/open_source.bin --port /dev/ttyACM<n>` を右→左の順で実行
+
+### アプリのエントリ
+
+起動チェーン: `Boot_Loader` (`platform/main/startup_main.S:35`) → `SystemInit` → newlib `_start` →
+`software_init_hook` (`rtos/rtx/TARGET_CORTEX_M/RTX_CM_lib.h:330`) が
+**`__libc_init_array` を呼び (static ctor はここで走る)**、`main` を RTOS スレッドとして起動 →
+`main()` (`platform/main/main.cpp:167`) → `hal_trace_open` (同 :217、**ここから TRACE が有効**) →
+`app_init()` (`apps/main/apps.cpp:1889`)。
+
+フック点: `app_init()` 末尾、`app_sysfreq_req(..., APP_SYSFREQ_32K)` (apps.cpp:2449) の**直前**。
+ここなら BT スタック初期化済み・クロックが 32K に落ちる前に計算を実行できる。
+`scripts/install-into-sdk.sh` がこの位置に `compute_main()` を挿入する。
+
+注意: static ctor は **RTOS 起動前・trace 有効化前**に走る。ctor 内の TRACE は
+UART オープン前のためバッファされるか失われる可能性があり、実機での見え方は要確認。
+
+### RTOS
+
+CMSIS-RTOS v1 RTX (`KERNEL=RTX`; `config/common.mk:822-826`、CPU=m4 のため)。
+スレッド生成は `osThreadCreate` (`rtos/rtx/TARGET_CORTEX_M/rt_CMSIS.c:657`)。
+使用例: `apps/common/app_thread.c:25-132` (`osThreadDef` + `osThreadCreate`)。
+
+### C++ の現状
+
+- `.cpp` はビルド一級市民 (`scripts/build.mk:260-267`)。`main.cpp` / `apps.cpp` 自体が C++
+- フラグ: **`-std=gnu++98 -fno-rtti`** (`Makefile:432`) + 共通の `-fno-exceptions`
+  `-fsingle-precision-constant -Wdouble-promotion -Wfloat-conversion` (`Makefile:400-425`)
+- `__libc_init_array` は `RTX_CM_lib.h:340` で呼ばれる → **static ctor は標準で動く**
+- `-fno-use-cxa-atexit` は未設定。`atexit(__libc_fini_array)` 登録あり
+
+### TRACE / UART
+
+- `TRACE(attr, fmt, ...)` (`platform/hal/hal_trace.h:205`)。**第 1 引数はフォーマット引数の個数**
+- ボーレート: `config/open_source/target.mk:370` `TRACE_BAUD_RATE := 2000000`
+- 有効化: `main.cpp:217` `hal_trace_open(HAL_TRACE_TRANSPORT_UART0)` 以降
+- SDK 付属の観測スクリプト: `uart_log.sh` (minicom, 2 Mbaud)
+
+### リンカ / メモリ
+
+- スクリプト: `scripts/link/best1000.lds.S` (名前は legacy、BES 汎用)
+- RAM: `0x20000000` 起点、`RAM_SIZE ≈ 0xC0000` (CP 領域を除く実効)。Flash 4MB (`0x3C000000` cached)
+- ヒープ/スタックセクションは各 `0x1000`。SRAM 残量は ビルド後の `out/open_source/open_source.map` で確認する
+
+### ソース追加方法
+
+`apps/main/Makefile:3` が `*.c *.cpp *.S` を wildcard で拾うため、**apps/main/ に
+ファイルを置くだけでビルドされる**。新ディレクトリの場合は `apps/Makefile:1` の
+`obj-y` に `mydir/` を追加し、そのディレクトリに Kbuild 風 Makefile を置く。
 
 ## 9. 付録 B: HANDOVER からの訂正メモ
 
 | HANDOVER の記述 | 実際 (repo HEAD) |
 |---|---|
 | `./clean.sh` | 存在しない。`./clear.sh` が正 |
+| freestanding C++ は `-std=c++17` を想定 | SDK の C++ は **`-std=gnu++98`**。C++11 以降の機能は使えない。本リポジトリの src/ は gnu++98 互換で書き、`make check98` で担保 |
+| `__libc_init_array` を呼ぶ起動コードの有無は要調査 | **呼ばれている** (`rtos/rtx/TARGET_CORTEX_M/RTX_CM_lib.h:340`)。ctor スタブ追加は不要見込み |
+| `trace(...)` は printf 形式 | `TRACE(attr, fmt, ...)` で第 1 引数は**フォーマット引数の個数** |
+| `-fno-use-cxa-atexit` を付ける | SDK は未設定のまま動いている。既定に合わせ、リンクエラーが出た場合のみ対処 |
 
-## 10. 次フェーズへの引き継ぎ
+## 10. 次フェーズへの引き継ぎ (nano-MPI + OpenMP 相当に向けて)
 
-(実機確認後に確定事実を記載: エントリ点、C++ 設定、SRAM 残量、trace API)
+**コード調査で確定した事実** (付録 A 参照):
+
+- エントリ点: `app_init()` 末尾 (apps.cpp:2449 直前) が一発実行フック。常駐タスクにするなら
+  `osThreadCreate` (RTX, CMSIS-RTOS v1) または `app_set_threadhandle` でアプリスレッドに登録
+- C++ 設定: gnu++98 / -fno-exceptions / -fno-rtti / -fsingle-precision-constant。
+  static ctor は標準で動く。カーネルは gnu++98 互換を維持すること (`make check98`)
+- trace API: `TRACE(nargs, fmt, ...)` @ 2 Mbaud UART0。`main.cpp:217` 以降有効
+- タイミング計測口: `GET_CURRENT_MS()` (`hal_timer.h:93`)。compute_trace.h でラップ済み
+- GEMM カーネルは行範囲 `[m0, m1)` 分割対応済み。分割等価性はホストテストで担保済み。
+  分散版の合否は本ファームの checksum (32768) との基準一致で判定する
+
+**実機確認待ち** (docker 到達後に埋める):
+
+- SRAM 実残量 (`out/open_source/open_source.map` の実測)
+- ctor 内 TRACE が UART オープン前でも見えるか (バッファされるか失われるか)
+- GEMM の実測 elapsed ms (将来の MFLOPS 比較の基準値)
+- ブリック復旧経路の実地確認

@@ -26,7 +26,9 @@ Windows 側 Docker Desktop の Settings → Resources → WSL integration を有
 
 ## ターゲット制約 (src/ のコードは必ず守る)
 
-- **freestanding C++17**: 例外・RTTI・STL・ヒープ (`new`/`malloc`) 禁止。静的バッファのみ
+- **freestanding C++, dialect は gnu++98**: SDK が `-std=gnu++98` でビルドするため
+  C++11 以降の機能は使えない (`make check98` で担保)。例外・RTTI・STL・ヒープ
+  (`new`/`malloc`) 禁止。静的バッファのみ
 - **`double` 禁止**: M4F は単精度 FPU のみ。リテラルは `1.0f`、`float` のみ使用
 - **カーネルは純関数**: グローバル状態・I/O をカーネルに持ち込まない。ログは呼び出し側
 - **データ分割を引数化**: 行範囲 `[m0, m1)` を引数に取る形にし、将来のコア間/バッズ間分割に備える
