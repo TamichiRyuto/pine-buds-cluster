@@ -3,7 +3,7 @@
 #include "gemm.h"
 
 namespace {
-constexpr int N = kGemmSelftestN;
+const int N = kGemmSelftestN;
 // Static buffers: 3 * 32*32*4 = 12 KB, fits the SRAM budget. No heap.
 float A[N][N];
 float B[N][N];

@@ -4,7 +4,8 @@
 #ifndef GEMM_SELFTEST_H
 #define GEMM_SELFTEST_H
 
-inline constexpr int kGemmSelftestN = 32;
+// enum keeps this gnu++98-compatible (OpenPineBuds compiles C++ as gnu++98).
+enum { kGemmSelftestN = 32 };
 
 struct GemmSelftestResult {
     bool pass;

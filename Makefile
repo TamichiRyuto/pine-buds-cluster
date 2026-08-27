@@ -9,9 +9,21 @@ BUILDDIR := build
 SRC      := $(wildcard src/*.cpp)
 TESTBIN  := $(BUILDDIR)/test_gemm
 
-.PHONY: test clean
+# OpenPineBuds compiles C++ as gnu++98 with these warning/float settings;
+# mirror them on the host so kernel code never drifts off the target dialect.
+TARGET_DIALECT := -std=gnu++98 -Wall -Wextra -Werror -Wdouble-promotion \
+                  -Wfloat-conversion -fno-exceptions -fno-rtti \
+                  -fsingle-precision-constant -Isrc -Ifirmware/pinebuds_compute
 
-test: $(TESTBIN)
+.PHONY: test check98 clean
+
+check98:
+	@mkdir -p $(BUILDDIR)/check98
+	$(CXX) $(TARGET_DIALECT) -c $(SRC) firmware/pinebuds_compute/compute_main.cpp
+	@mv *.o $(BUILDDIR)/check98/
+	@echo "gnu++98 target-dialect check OK"
+
+test: $(TESTBIN) check98
 	./$(TESTBIN)
 
 $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.h
