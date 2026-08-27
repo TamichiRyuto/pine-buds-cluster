@@ -6,7 +6,7 @@
 // [x] rectangular M,N,K: non-square shapes work
 // [x] row range [m0, m1): rows outside the range are left untouched
 // [x] selftest: A=B=1, N=32 => checksum == 32768.0f exactly, PASS
-// [ ] partition equivalence: two half-range calls == one full-range call
+// [x] partition equivalence: two half-range calls == one full-range call
 
 #include "test_framework.h"
 
@@ -63,11 +63,33 @@ static void test_selftest_ones_matrix_passes() {
     CHECK(r.fail_j == -1);
 }
 
+static void test_partition_equivalence() {
+    // Deterministic non-uniform integer-valued matrices so every partial
+    // product stays exactly representable in float32.
+    constexpr int N = 8;
+    static float a[N * N], b[N * N], c_full[N * N], c_split[N * N];
+    for (int i = 0; i < N * N; ++i) {
+        a[i] = static_cast<float>(i % 5);
+        b[i] = static_cast<float>((i * 3) % 7);
+        c_full[i] = 0.0f;
+        c_split[i] = 0.0f;
+    }
+
+    gemm(0, N, N, N, a, b, c_full);
+    gemm(0, N / 2, N, N, a, b, c_split);  // future: core 0 / bud L
+    gemm(N / 2, N, N, N, a, b, c_split);  // future: core 1 / bud R
+
+    for (int i = 0; i < N * N; ++i) {
+        CHECK(c_split[i] == c_full[i]);
+    }
+}
+
 int main() {
     RUN_TEST(test_1x1);
     RUN_TEST(test_2x2);
     RUN_TEST(test_rectangular);
     RUN_TEST(test_row_range_leaves_other_rows_untouched);
     RUN_TEST(test_selftest_ones_matrix_passes);
+    RUN_TEST(test_partition_equivalence);
     return testfw::summary();
 }
