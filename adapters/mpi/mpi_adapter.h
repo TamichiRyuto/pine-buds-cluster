@@ -14,6 +14,20 @@ extern "C" {
 
 void mpi_adapter_bootstrap(int rank, int size);
 
+// Concurrency port seam: lets a host pthread harness (or, on target, an IBRT
+// loop) give the adapter real blocking semantics without pulling threads or
+// STL into this freestanding core. NULL restores sequential (non-blocking)
+// mode.
+typedef struct mpi_adapter_port {
+    int  (*self_rank)(void);  /* calling rank; overrides the bootstrap rank */
+    void (*lock)(void);
+    void (*unlock)(void);
+    void (*wait)(void);       /* condition wait: atomically unlock+wait+relock */
+    void (*wake)(void);       /* wake all waiters */
+} mpi_adapter_port;
+
+void mpi_adapter_set_port(const mpi_adapter_port *port);
+
 #ifdef __cplusplus
 }
 #endif

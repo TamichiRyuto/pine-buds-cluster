@@ -16,12 +16,18 @@
 // [x] MPI_Barrier: returns MPI_SUCCESS (real sync deferred to target transport)
 // [x] MPI_Wtime: monotonic non-negative seconds (double signature for API
 //     compatibility; internally single-precision on target)
-// [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks
+// [ ] pthread port: MPI_Recv blocks until the peer thread sends, and
+//     MPI_Comm_rank reports each thread's own rank
+// [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks (threaded)
+// [ ] MPI_Barrier under pthread port: real rendezvous of both ranks
+
+#include <time.h>
 
 #include "test_framework.h"
 
 #include "mpi.h"
 #include "mpi_adapter.h"  // bootstrap seam (not part of the MPI API surface)
+#include "mpi_thread_port.h"
 
 static void test_init_rank_size() {
     mpi_adapter_bootstrap(0, 2);
@@ -153,6 +159,42 @@ static void test_wtime_monotonic() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+// Results from rank threads; the testfw counters are not thread-safe, so
+// rank bodies only record into these and the main thread does the CHECKs.
+static int g_threaded_send_rc = -1;
+static int g_threaded_recv_rc = -1;
+static float g_threaded_recv_val = 0.0f;
+static int g_threaded_observed_rank[2] = {-1, -1};
+
+static void threaded_send_recv_body(int rank) {
+    MPI_Comm_rank(MPI_COMM_WORLD, &g_threaded_observed_rank[rank]);
+    if (rank == 1) {
+        // Runs first (rank 0 sleeps), so this Recv must genuinely block.
+        float in = 0.0f;
+        MPI_Status status;
+        g_threaded_recv_rc =
+            MPI_Recv(&in, 1, MPI_FLOAT, 0, 7, MPI_COMM_WORLD, &status);
+        g_threaded_recv_val = in;
+    } else {
+        struct timespec ts = {0, 50L * 1000L * 1000L};  // 50 ms head start
+        nanosleep(&ts, 0);
+        float out = 5.0f;
+        g_threaded_send_rc = MPI_Send(&out, 1, MPI_FLOAT, 1, 7, MPI_COMM_WORLD);
+    }
+}
+
+static void test_threaded_blocking_recv() {
+    mpi_adapter_bootstrap(0, 2);  // size = 2; per-thread rank comes from port
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&threaded_send_recv_body);
+    CHECK(g_threaded_send_rc == MPI_SUCCESS);
+    CHECK(g_threaded_recv_rc == MPI_SUCCESS);
+    CHECK_EQ_F(g_threaded_recv_val, 5.0f);
+    CHECK(g_threaded_observed_rank[0] == 0);
+    CHECK(g_threaded_observed_rank[1] == 1);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -161,5 +203,6 @@ int main() {
     RUN_TEST(test_loopback_error_paths);
     RUN_TEST(test_barrier_returns_success);
     RUN_TEST(test_wtime_monotonic);
+    RUN_TEST(test_threaded_blocking_recv);
     return testfw::summary();
 }

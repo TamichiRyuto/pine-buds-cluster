@@ -36,9 +36,9 @@ $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Itests tests/test_gemm.cpp $(SRC) -o $@
 
-$(MPIBIN): tests/test_mpi_adapter.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tests/test_framework.h
+$(MPIBIN): tests/test_mpi_adapter.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tests/test_framework.h tests/mpi_thread_port.h
 	@mkdir -p $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -Iadapters/mpi -Itests tests/test_mpi_adapter.cpp $(MPISRC) -o $@
+	$(CXX) $(CXXFLAGS) -pthread -Iadapters/mpi -Itests tests/test_mpi_adapter.cpp $(MPISRC) -o $@
 
 $(OMPBIN): tests/test_omp_stub.cpp $(OMPSRC) $(wildcard adapters/omp/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)

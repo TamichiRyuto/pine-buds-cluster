@@ -27,6 +27,21 @@ namespace {
 
     QueueSlot g_queue[MPI_ADAPTER_QUEUE_SLOTS];
 
+    // Concurrency port: a copy of the caller's struct (which may be
+    // stack-allocated) plus an installed flag. NULL/not-installed means
+    // sequential mode, matching the original non-blocking behavior.
+    mpi_adapter_port g_port;
+    int g_port_installed = 0;
+
+    // Calling rank: the port's self_rank() when installed (per-thread
+    // identity), else the bootstrap rank g_rank.
+    int current_rank(void) {
+        if (g_port_installed) {
+            return g_port.self_rank();
+        }
+        return g_rank;
+    }
+
     int mpi_datatype_size(MPI_Datatype datatype) {
         switch (datatype) {
             case MPI_FLOAT:
@@ -67,9 +82,18 @@ extern "C" int MPI_Finalized(int *flag) {
     return MPI_SUCCESS;
 }
 
+extern "C" void mpi_adapter_set_port(const mpi_adapter_port *port) {
+    if (port == 0) {
+        g_port_installed = 0;
+        return;
+    }
+    g_port = *port;
+    g_port_installed = 1;
+}
+
 extern "C" int MPI_Comm_rank(MPI_Comm comm, int *rank) {
     (void)comm;
-    *rank = g_rank;
+    *rank = current_rank();
     return MPI_SUCCESS;
 }
 
@@ -88,6 +112,29 @@ extern "C" int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
                          int dest, int tag, MPI_Comm comm) {
     (void)comm;
     int byte_len = count * mpi_datatype_size(datatype);
+
+    if (g_port_installed) {
+        g_port.lock();
+        if (byte_len > MPI_ADAPTER_MAX_PAYLOAD_BYTES) {
+            g_port.unlock();
+            return MPI_ERR_COUNT;
+        }
+        for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
+            if (!g_queue[i].in_use) {
+                g_queue[i].in_use = 1;
+                g_queue[i].source = current_rank();
+                g_queue[i].dest = dest;
+                g_queue[i].tag = tag;
+                g_queue[i].byte_len = byte_len;
+                memcpy(g_queue[i].payload, buf, byte_len);
+                g_port.wake();
+                g_port.unlock();
+                return MPI_SUCCESS;
+            }
+        }
+        g_port.unlock();
+        return MPI_ERR_INTERN;
+    }
 
     if (byte_len > MPI_ADAPTER_MAX_PAYLOAD_BYTES) {
         return MPI_ERR_COUNT;
@@ -113,6 +160,31 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
     (void)comm;
     (void)count;
     (void)datatype;
+
+    if (g_port_installed) {
+        g_port.lock();
+        for (;;) {
+            int dest_rank = current_rank();
+            int found = 0;
+            for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
+                if (g_queue[i].in_use && g_queue[i].dest == dest_rank &&
+                    g_queue[i].source == source && g_queue[i].tag == tag) {
+                    memcpy(buf, g_queue[i].payload, g_queue[i].byte_len);
+                    status->MPI_SOURCE = g_queue[i].source;
+                    status->MPI_TAG = g_queue[i].tag;
+                    g_queue[i].in_use = 0;
+                    g_port.wake();
+                    found = 1;
+                    break;
+                }
+            }
+            if (found) {
+                g_port.unlock();
+                return MPI_SUCCESS;
+            }
+            g_port.wait();
+        }
+    }
 
     for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
         if (g_queue[i].in_use && g_queue[i].dest == g_rank &&
