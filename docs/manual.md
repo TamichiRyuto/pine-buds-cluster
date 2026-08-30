@@ -54,12 +54,24 @@ usbipd bind --busid <BUSID>
 usbipd attach --wsl --busid <BUSID>
 ```
 
+アタッチ後にポートが出ない場合は `sudo modprobe cdc_acm` を実行する (WSL カーネルは
+CDC-ACM ドライバを自動ロードしないことがある。実測 2026-08-30)。
 WSL 側で `ls /dev/ttyACM*` に 2 ポート (右=ACM0, 左=ACM1 の想定) が出れば OK。
-権限エラーが出る場合は `sudo usermod -aG dialout $USER` 後にシェルを開き直す。
+ポートは root 所有になることがあるが、ビルドコンテナは privileged なので影響しない。
+ホスト側で picocom を使う場合は `sudo usermod -aG dialout $USER` 後にシェルを開き直す。
 
 ```bash
 # 1) 既存ファームのバックアップ (フラッシュで消えるため必須。出力は必ず保全する)
-./backup.sh
+docker compose run --rm builder ./backup.sh
+```
+
+backup.sh は**対話式**: 「Please disconnect and reconnect the bud on the right」と
+表示されたら右バッズをケースから出して 3 秒待って戻す (bestool がリブートを捕捉して
+読み出す)。右が終わると左も同様に促される。完了すると
+`firmware-backups/firmware-<timestamp>-{0,1}.bin.bkp` が 2 つできるので、
+**必ず別ディスク (例: `/mnt/c/Users/<name>/pinebuds-backup/`) へコピーして保全する**。
+
+```bash
 
 # 2) 書き込み
 ./download.sh
