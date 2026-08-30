@@ -36,6 +36,9 @@
 //     (covered by every existing test above)
 // [x] wtime seam: mpi_adapter_set_wtime swaps the MPI_Wtime source and
 //     NULL restores the host clock
+// [x] E2E: full stack MPI_Send -> mpi_frag -> frame wire -> reassembly ->
+//     mpi_adapter_deliver, threaded 512B exchange both ways, zero frag
+//     errors, credits fully recycled (integration of TDD'd units)
 
 #include <time.h>
 
@@ -450,6 +453,93 @@ static void test_transport_disconnected_wire() {
     mpi_adapter_set_transport(0);
 }
 
+// --- E2E: frag module wired in as the real transport ---
+// Mirrors the target wiring exactly (design §6): transport.send ->
+// mpi_frag_send; frag emit -> "the wire" -> peer's mpi_frag_on_frame;
+// frag deliver -> mpi_adapter_deliver. On host both sides share one frag
+// instance, and a harness mutex serializes wire activity because the two
+// rank threads would otherwise race on the frag module's static state
+// (on target each bud has its own instance, so no such lock exists).
+#include "mpi_frag.h"
+
+static pthread_mutex_t g_e2e_mtx = PTHREAD_MUTEX_INITIALIZER;
+static int g_e2e_credits = 2;  // design §5: window W=2
+static int g_e2e_min_credits = 2;
+
+static int e2e_emit(const void *frame, int frame_len) {
+    // The wire: hand the frame straight to the (shared) peer instance.
+    return mpi_frag_on_frame(frame, frame_len);
+}
+static int e2e_acquire(void) {
+    if (g_e2e_credits <= 0) return 1;
+    --g_e2e_credits;
+    if (g_e2e_credits < g_e2e_min_credits) g_e2e_min_credits = g_e2e_credits;
+    return 0;
+}
+static void e2e_release(void) { ++g_e2e_credits; }
+
+static int e2e_transport_send(int src, int dest, int tag, const void *buf,
+                              int byte_len) {
+    pthread_mutex_lock(&g_e2e_mtx);
+    int rc = mpi_frag_send(src, dest, tag, buf, byte_len);
+    pthread_mutex_unlock(&g_e2e_mtx);
+    return rc;
+}
+
+static int g_e2e_rc[2] = {-1, -1};
+static float g_e2e_in[2][128];
+
+static void e2e_body(int rank) {
+    int peer = 1 - rank;
+    float out[128];
+    for (int i = 0; i < 128; ++i) {
+        out[i] = (float)(rank * 1000 + i);
+    }
+    // Full 512B messages so both directions exercise 2-fragment reassembly.
+    int rc = MPI_Send(out, 128, MPI_FLOAT, peer, 21, MPI_COMM_WORLD);
+    if (rc == MPI_SUCCESS) {
+        MPI_Status status;
+        rc = MPI_Recv(g_e2e_in[rank], 128, MPI_FLOAT, peer, 21,
+                      MPI_COMM_WORLD, &status);
+    }
+    g_e2e_rc[rank] = rc;
+}
+
+static void test_transport_frag_e2e() {
+    static mpi_frag_port fport;
+    fport.emit = &e2e_emit;
+    fport.deliver = &mpi_adapter_deliver;
+    fport.acquire_credit = &e2e_acquire;
+    fport.release_credit = &e2e_release;
+    mpi_frag_init(&fport);
+    g_e2e_credits = 2;
+    g_e2e_min_credits = 2;
+
+    mpi_adapter_transport transport;
+    transport.send = &e2e_transport_send;
+    mpi_adapter_set_transport(&transport);
+
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&e2e_body);
+    CHECK(g_e2e_rc[0] == MPI_SUCCESS);
+    CHECK(g_e2e_rc[1] == MPI_SUCCESS);
+    for (int i = 0; i < 128; ++i) {
+        CHECK_EQ_F(g_e2e_in[0][i], (float)(1000 + i));  // rank0 got rank1's
+        CHECK_EQ_F(g_e2e_in[1][i], (float)(i));         // rank1 got rank0's
+    }
+
+    unsigned tx = 0, rx = 0, err = 0;
+    mpi_frag_counters(&tx, &rx, &err);
+    CHECK(tx == 4);          // 2 messages x 2 fragments
+    CHECK(err == 0);
+    CHECK(g_e2e_credits == 2);      // every credit came back
+    CHECK(g_e2e_min_credits >= 0);  // window never went negative
+
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+    mpi_adapter_set_transport(0);
+}
+
 static double fake_wtime(void) { return 1234.5; }
 
 static void test_wtime_seam() {
@@ -481,5 +571,6 @@ int main() {
     RUN_TEST(test_transport_wire_crossing);
     RUN_TEST(test_transport_disconnected_wire);
     RUN_TEST(test_wtime_seam);
+    RUN_TEST(test_transport_frag_e2e);
     return testfw::summary();
 }
