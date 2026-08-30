@@ -4,6 +4,7 @@
 #include "mpi_adapter.h"
 
 #include <string.h>
+#include <time.h>
 
 namespace {
     int g_rank = 0;
@@ -33,6 +34,12 @@ namespace {
             default:
                 return (int)sizeof(float);
         }
+    }
+
+    // Host time source, isolated so a target port can swap this for a hal
+    // timer without touching the MPI_Wtime API surface above.
+    double wtime_seconds(void) {
+        return (double)clock() / (double)CLOCKS_PER_SEC;
     }
 }
 
@@ -118,4 +125,8 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
         }
     }
     return MPI_ERR_OTHER;
+}
+
+extern "C" double MPI_Wtime(void) {
+    return wtime_seconds();
 }

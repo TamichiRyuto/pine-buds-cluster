@@ -14,7 +14,8 @@
 // [x] MPI_Send with queue full: rejected with an error (not silent success)
 // [x] MPI_Recv with no matching message: error (loopback cannot block)
 // [ ] MPI_Barrier: returns MPI_SUCCESS (2-rank sync via loopback transport)
-// [ ] MPI_Wtime: monotonic non-negative float seconds
+// [x] MPI_Wtime: monotonic non-negative seconds (double signature for API
+//     compatibility; internally single-precision on target)
 // [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks
 
 #include "test_framework.h"
@@ -128,11 +129,27 @@ static void test_loopback_error_paths() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_wtime_monotonic() {
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+
+    double t0 = MPI_Wtime();
+    CHECK(t0 >= 0.0);
+    // Burn a little CPU so a coarse clock still has a chance to advance.
+    volatile float sink = 0.0f;
+    for (int i = 0; i < 100000; ++i) sink = sink + 1.0f;
+    double t1 = MPI_Wtime();
+    CHECK(t1 >= t0);
+
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
     RUN_TEST(test_initialized_finalized_flags);
     RUN_TEST(test_send_recv_float);
     RUN_TEST(test_loopback_error_paths);
+    RUN_TEST(test_wtime_monotonic);
     return testfw::summary();
 }
