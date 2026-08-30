@@ -38,15 +38,20 @@ else
 import sys
 
 path = sys.argv[1]
-anchor = "  app_sysfreq_req(APP_SYSFREQ_USER_APP_INIT, APP_SYSFREQ_32K);"
-hook = """  { /* pine-buds-cluster compute hook: run before the sysfreq drop */
-    extern "C" void compute_main(void);
-    compute_main();
-  }
+# extern "C" is a linkage-specification: it must live at file scope,
+# not inside a block. Declare above app_init, call inside it.
+decl_anchor = "int app_init(void)"
+decl = 'extern "C" void compute_main(void); /* pine-buds-cluster */\n\n'
+call_anchor = "  app_sysfreq_req(APP_SYSFREQ_USER_APP_INIT, APP_SYSFREQ_32K);"
+call = """  /* pine-buds-cluster compute hook: run before the sysfreq drop */
+  compute_main();
 """
 text = open(path).read()
-assert text.count(anchor) == 1, "anchor line not unique; SDK changed, re-check"
-open(path, "w").write(text.replace(anchor, hook + anchor))
+assert text.count(decl_anchor) == 1, "app_init definition not unique; re-check"
+assert text.count(call_anchor) == 1, "sysfreq anchor not unique; re-check"
+text = text.replace(decl_anchor, decl + decl_anchor)
+text = text.replace(call_anchor, call + call_anchor)
+open(path, "w").write(text)
 EOF
     echo "[ok] compute_main() hooked into app_init (before 32K sysfreq drop)"
 fi
