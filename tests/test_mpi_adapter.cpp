@@ -7,8 +7,8 @@
 // Test list (t-wada style):
 // [x] bootstrap + MPI_Init: MPI_Comm_rank/MPI_Comm_size report rank 0 of 2
 // [x] rank 1 bootstrap: MPI_Comm_rank reports 1 (triangulation)
-// [ ] MPI_Initialized: 0 before MPI_Init, 1 after
-// [ ] MPI_Finalize: returns MPI_SUCCESS, MPI_Finalized flips to 1
+// [x] MPI_Initialized: 0 before MPI_Init, 1 after
+// [x] MPI_Finalize: returns MPI_SUCCESS, MPI_Finalized flips to 1
 // [ ] MPI_Send/MPI_Recv MPI_FLOAT: rank0 -> rank1 payload arrives intact
 // [ ] MPI_Barrier: returns MPI_SUCCESS (2-rank sync via loopback transport)
 // [ ] MPI_Wtime: monotonic non-negative float seconds
@@ -44,8 +44,30 @@ static void test_rank1_bootstrap() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_initialized_finalized_flags() {
+    // Fresh adapter state: bootstrap resets the init/finalize flags too.
+    mpi_adapter_bootstrap(0, 2);
+
+    int flag = -1;
+    CHECK(MPI_Initialized(&flag) == MPI_SUCCESS);
+    CHECK(flag == 0);
+    CHECK(MPI_Finalized(&flag) == MPI_SUCCESS);
+    CHECK(flag == 0);
+
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    CHECK(MPI_Initialized(&flag) == MPI_SUCCESS);
+    CHECK(flag == 1);
+    CHECK(MPI_Finalized(&flag) == MPI_SUCCESS);
+    CHECK(flag == 0);
+
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+    CHECK(MPI_Finalized(&flag) == MPI_SUCCESS);
+    CHECK(flag == 1);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
+    RUN_TEST(test_initialized_finalized_flags);
     return testfw::summary();
 }

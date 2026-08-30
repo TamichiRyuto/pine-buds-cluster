@@ -16,6 +16,8 @@ int MPI_Init(int *argc, char ***argv);
 int MPI_Comm_rank(MPI_Comm comm, int *rank);
 int MPI_Comm_size(MPI_Comm comm, int *size);
 int MPI_Finalize(void);
+int MPI_Initialized(int *flag);
+int MPI_Finalized(int *flag);
 
 #ifdef __cplusplus
 }
