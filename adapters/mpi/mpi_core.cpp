@@ -75,6 +75,10 @@ namespace {
         return 0;
     }
 
+    // Tag range reserved for MPI_Allreduce's internal Send/Recv pair. User
+    // code must not use tags in this range (0x7FFF0000 and 0x7FFF0001).
+    const int kAllreduceTag = 0x7FFF0000;
+
     int dequeue_match(int dest, int source, int tag, void *buf,
                       MPI_Status *status) {
         for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
@@ -194,4 +198,47 @@ extern "C" int MPI_Barrier(MPI_Comm comm) {
 
 extern "C" double MPI_Wtime(void) {
     return wtime_seconds();
+}
+
+extern "C" int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
+                              MPI_Datatype datatype, MPI_Op op,
+                              MPI_Comm comm) {
+    (void)op;  // only MPI_SUM is implemented, which is all that's needed
+    int byte_len = count * mpi_datatype_size(datatype);
+
+    if (g_size == 1) {
+        memcpy(recvbuf, sendbuf, byte_len);
+        return MPI_SUCCESS;
+    }
+
+    // Two-rank reduce-to-root-then-broadcast, built on the existing
+    // Send/Recv primitives so it works under both sequential and threaded
+    // (mpi_thread_port) modes.
+    if (current_rank() != 0) {
+        int rc = MPI_Send(sendbuf, count, datatype, 0, kAllreduceTag, comm);
+        if (rc != MPI_SUCCESS) {
+            return rc;
+        }
+        MPI_Status status;
+        return MPI_Recv(recvbuf, count, datatype, 0, kAllreduceTag + 1, comm,
+                        &status);
+    }
+
+    memcpy(recvbuf, sendbuf, byte_len);
+
+    static char scratch[MPI_ADAPTER_MAX_PAYLOAD_BYTES];
+    MPI_Status status;
+    int rc = MPI_Recv(scratch, count, datatype, 1, kAllreduceTag, comm,
+                      &status);
+    if (rc != MPI_SUCCESS) {
+        return rc;
+    }
+
+    float *out = (float *)recvbuf;
+    const float *peer = (const float *)scratch;
+    for (int i = 0; i < count; ++i) {
+        out[i] = out[i] + peer[i];
+    }
+
+    return MPI_Send(recvbuf, count, datatype, 1, kAllreduceTag + 1, comm);
 }

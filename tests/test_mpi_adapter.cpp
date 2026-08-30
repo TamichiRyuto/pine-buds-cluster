@@ -16,9 +16,9 @@
 // [x] MPI_Barrier: returns MPI_SUCCESS (real sync deferred to target transport)
 // [x] MPI_Wtime: monotonic non-negative seconds (double signature for API
 //     compatibility; internally single-precision on target)
-// [ ] pthread port: MPI_Recv blocks until the peer thread sends, and
+// [x] pthread port: MPI_Recv blocks until the peer thread sends, and
 //     MPI_Comm_rank reports each thread's own rank
-// [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks (threaded)
+// [x] MPI_Allreduce MPI_SUM on floats across 2 ranks (threaded)
 // [ ] MPI_Barrier under pthread port: real rendezvous of both ranks
 
 #include <time.h>
@@ -195,6 +195,33 @@ static void test_threaded_blocking_recv() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static int g_allreduce_rc[2] = {-1, -1};
+static float g_allreduce_out[2][2];
+
+static void threaded_allreduce_body(int rank) {
+    float in[2];
+    in[0] = (rank == 0) ? 1.0f : 10.0f;
+    in[1] = (rank == 0) ? 2.0f : 20.0f;
+    float out[2] = {0.0f, 0.0f};
+    g_allreduce_rc[rank] =
+        MPI_Allreduce(in, out, 2, MPI_FLOAT, MPI_SUM, MPI_COMM_WORLD);
+    g_allreduce_out[rank][0] = out[0];
+    g_allreduce_out[rank][1] = out[1];
+}
+
+static void test_threaded_allreduce_sum() {
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&threaded_allreduce_body);
+    CHECK(g_allreduce_rc[0] == MPI_SUCCESS);
+    CHECK(g_allreduce_rc[1] == MPI_SUCCESS);
+    CHECK_EQ_F(g_allreduce_out[0][0], 11.0f);
+    CHECK_EQ_F(g_allreduce_out[0][1], 22.0f);
+    CHECK_EQ_F(g_allreduce_out[1][0], 11.0f);
+    CHECK_EQ_F(g_allreduce_out[1][1], 22.0f);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -204,5 +231,6 @@ int main() {
     RUN_TEST(test_barrier_returns_success);
     RUN_TEST(test_wtime_monotonic);
     RUN_TEST(test_threaded_blocking_recv);
+    RUN_TEST(test_threaded_allreduce_sum);
     return testfw::summary();
 }

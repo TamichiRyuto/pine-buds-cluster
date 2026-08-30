@@ -9,6 +9,7 @@ extern "C" {
 
 typedef int MPI_Comm;
 typedef int MPI_Datatype;
+typedef int MPI_Op;
 
 #define MPI_SUCCESS 0
 #define MPI_ERR_COUNT 2
@@ -16,6 +17,7 @@ typedef int MPI_Datatype;
 #define MPI_ERR_INTERN 16
 #define MPI_COMM_WORLD ((MPI_Comm)0)
 #define MPI_FLOAT ((MPI_Datatype)0)
+#define MPI_SUM ((MPI_Op)0)
 
 typedef struct MPI_Status {
     int MPI_SOURCE;
@@ -34,6 +36,8 @@ int MPI_Recv(void *buf, int count, MPI_Datatype datatype, int source,
              int tag, MPI_Comm comm, MPI_Status *status);
 int MPI_Barrier(MPI_Comm comm);
 double MPI_Wtime(void);
+int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
+                   MPI_Datatype datatype, MPI_Op op, MPI_Comm comm);
 
 #ifdef __cplusplus
 }
