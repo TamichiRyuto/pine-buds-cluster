@@ -3,7 +3,9 @@
 PineBuds Pro (Bestechnic BES2300YP, dual-core Cortex-M4F) を計算クラスタ化する実験リポジトリ。
 現フェーズ (Phase 0.5) のゴールは `HANDOVER_pinebuds_cpp_bringup.md` に定義:
 C++ hello-world と単コア float GEMM 自己検証を実機 UART (2 Mbaud) で確認する。
-上位ゴールは左右バッズを nano-MPI で結び、ノード内 2 コア並列で GEMM / Red-Black SOR を分散実行すること。
+上位ゴールは左右バッズを自作 MPI サブセット (`adapters/mpi/`) で結び、ノード内 2 コア並列で
+GEMM / Red-Black SOR を分散実行すること。
+(旧称 "nano-MPI"。外部プロジェクト Quentin-Anthony/nanoMPI とは無関係の自作アダプタ)
 
 ## リポジトリ構成
 

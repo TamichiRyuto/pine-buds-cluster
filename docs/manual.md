@@ -12,7 +12,7 @@
 3. **FPU の実数値計算が正しい** — N=32 の float GEMM を決定的ケース
    (A=B=全 1 ⇒ checksum=N³=32768、float32 で厳密表現可) で自己検証し PASS/FAIL を出す
 
-この単コア GEMM が次フェーズ (nano-MPI + 2 コア並列) の**ゴールデン基準**になる:
+この単コア GEMM が次フェーズ (MPI サブセットアダプタ + 2 コア並列) の**ゴールデン基準**になる:
 分散版の正しさは「これと同じ checksum が出るか」で判定する。
 
 ## 2. 必要なもの
@@ -220,7 +220,7 @@ CMSIS-RTOS v1 RTX (`KERNEL=RTX`; `config/common.mk:822-826`、CPU=m4 のため)�
 | SRAM 992KB | 公式一致。加えて **BT 共有 SRAM 64KB** が別枠で存在 (公式 Wiki) |
 | ケースの USB-UART は CH342DS (公式 Wiki) | 手元の実機は **CH347** (VID:PID 1a86:55da, USB-HiSpeed-SERIAL A/B) だった。ハードリビジョン差とみられる。CH347 の UART も CDC-ACM なので手順への影響なし (2026-08-30 実測) |
 
-## 10. 次フェーズへの引き継ぎ (nano-MPI + OpenMP 相当に向けて)
+## 10. 次フェーズへの引き継ぎ (MPI サブセットアダプタ + OpenMP 相当に向けて)
 
 **コード調査で確定した事実** (付録 A 参照):
 
