@@ -23,7 +23,7 @@ TARGET_DIALECT := -std=gnu++98 -Wall -Wextra -Werror -Wdouble-promotion \
 
 check98:
 	@mkdir -p $(BUILDDIR)/check98
-	$(CXX) $(TARGET_DIALECT) -Iadapters/mpi -c $(SRC) $(MPISRC) firmware/pinebuds_compute/compute_main.cpp
+	$(CXX) $(TARGET_DIALECT) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) firmware/pinebuds_compute/compute_main.cpp
 	@mv *.o $(BUILDDIR)/check98/
 	@echo "gnu++98 target-dialect check OK"
 
