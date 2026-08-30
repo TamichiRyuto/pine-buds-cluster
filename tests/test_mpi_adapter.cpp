@@ -19,7 +19,7 @@
 // [x] pthread port: MPI_Recv blocks until the peer thread sends, and
 //     MPI_Comm_rank reports each thread's own rank
 // [x] MPI_Allreduce MPI_SUM on floats across 2 ranks (threaded)
-// [ ] MPI_Barrier under pthread port: real rendezvous of both ranks
+// [x] MPI_Barrier under pthread port: real rendezvous of both ranks
 
 #include <time.h>
 
@@ -222,6 +222,34 @@ static void test_threaded_allreduce_sum() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static int g_barrier_rc[2] = {-1, -1};
+static volatile int g_pre_barrier_flag = 0;
+static int g_flag_seen_by_rank1 = -1;
+
+static void threaded_barrier_body(int rank) {
+    if (rank == 0) {
+        // Arrive late; a real barrier makes rank 1 wait for this flag.
+        struct timespec ts = {0, 50L * 1000L * 1000L};
+        nanosleep(&ts, 0);
+        g_pre_barrier_flag = 1;
+        g_barrier_rc[0] = MPI_Barrier(MPI_COMM_WORLD);
+    } else {
+        g_barrier_rc[1] = MPI_Barrier(MPI_COMM_WORLD);
+        g_flag_seen_by_rank1 = g_pre_barrier_flag;
+    }
+}
+
+static void test_threaded_barrier_rendezvous() {
+    g_pre_barrier_flag = 0;
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&threaded_barrier_body);
+    CHECK(g_barrier_rc[0] == MPI_SUCCESS);
+    CHECK(g_barrier_rc[1] == MPI_SUCCESS);
+    CHECK(g_flag_seen_by_rank1 == 1);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -232,5 +260,6 @@ int main() {
     RUN_TEST(test_wtime_monotonic);
     RUN_TEST(test_threaded_blocking_recv);
     RUN_TEST(test_threaded_allreduce_sum);
+    RUN_TEST(test_threaded_barrier_rendezvous);
     return testfw::summary();
 }

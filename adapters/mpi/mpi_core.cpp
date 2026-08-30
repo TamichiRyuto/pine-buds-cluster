@@ -75,9 +75,11 @@ namespace {
         return 0;
     }
 
-    // Tag range reserved for MPI_Allreduce's internal Send/Recv pair. User
-    // code must not use tags in this range (0x7FFF0000 and 0x7FFF0001).
+    // Tag range reserved for MPI_Allreduce's and MPI_Barrier's internal
+    // Send/Recv pairs. User code must not use tags in this range
+    // (0x7FFF0000..0x7FFF0003).
     const int kAllreduceTag = 0x7FFF0000;
+    const int kBarrierTag = 0x7FFF0002;
 
     int dequeue_match(int dest, int source, int tag, void *buf,
                       MPI_Status *status) {
@@ -192,8 +194,30 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
 extern "C" int MPI_Barrier(MPI_Comm comm) {
     (void)comm;
     // Sequential host loopback runs one rank at a time, so there is nothing
-    // to synchronize with; the target IBRT transport implements real sync.
-    return MPI_SUCCESS;
+    // to synchronize with; without a port, keep returning immediately.
+    if (!g_port_installed || g_size < 2) {
+        return MPI_SUCCESS;
+    }
+
+    // Two-rank token rendezvous, built on the existing Send/Recv primitives,
+    // mirroring MPI_Allreduce's reduce-to-root-then-broadcast shape.
+    float token = 0.0f;
+    if (current_rank() != 0) {
+        int rc = MPI_Send(&token, 1, MPI_FLOAT, 0, kBarrierTag, comm);
+        if (rc != MPI_SUCCESS) {
+            return rc;
+        }
+        MPI_Status status;
+        return MPI_Recv(&token, 1, MPI_FLOAT, 0, kBarrierTag + 1, comm,
+                        &status);
+    }
+
+    MPI_Status status;
+    int rc = MPI_Recv(&token, 1, MPI_FLOAT, 1, kBarrierTag, comm, &status);
+    if (rc != MPI_SUCCESS) {
+        return rc;
+    }
+    return MPI_Send(&token, 1, MPI_FLOAT, 1, kBarrierTag + 1, comm);
 }
 
 extern "C" double MPI_Wtime(void) {
