@@ -47,6 +47,12 @@ void mpi_adapter_set_transport(const mpi_adapter_transport *transport);
 int mpi_adapter_deliver(int source, int dest, int tag,
                         const void *buf, int byte_len);
 
+// Time seam: swaps the MPI_Wtime source (target: GET_CURRENT_MS-based); NULL
+// restores the host clock.
+typedef double (*mpi_adapter_wtime_fn)(void);
+
+void mpi_adapter_set_wtime(mpi_adapter_wtime_fn fn);
+
 #ifdef __cplusplus
 }
 #endif

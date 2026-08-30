@@ -40,6 +40,10 @@ namespace {
     mpi_adapter_transport g_transport;
     int g_transport_installed = 0;
 
+    // Time seam: overrides wtime_seconds() below when installed. NULL means
+    // the host clock, matching the original behavior.
+    mpi_adapter_wtime_fn g_wtime_fn = 0;
+
     // Calling rank: the port's self_rank() when installed (per-thread
     // identity), else the bootstrap rank g_rank.
     int current_rank(void) {
@@ -191,6 +195,10 @@ extern "C" void mpi_adapter_set_transport(const mpi_adapter_transport *transport
     g_transport_installed = 1;
 }
 
+extern "C" void mpi_adapter_set_wtime(mpi_adapter_wtime_fn fn) {
+    g_wtime_fn = fn;
+}
+
 extern "C" int MPI_Comm_rank(MPI_Comm comm, int *rank) {
     (void)comm;
     *rank = current_rank();
@@ -314,6 +322,9 @@ extern "C" int MPI_Barrier(MPI_Comm comm) {
 }
 
 extern "C" double MPI_Wtime(void) {
+    if (g_wtime_fn != 0) {
+        return g_wtime_fn();
+    }
     return wtime_seconds();
 }
 

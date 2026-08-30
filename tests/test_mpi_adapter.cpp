@@ -34,6 +34,8 @@
 //     and nothing lands in the local queue (Recv -> MPI_ERR_OTHER)
 // [x] T6 regression: without a transport installed behavior is unchanged
 //     (covered by every existing test above)
+// [x] wtime seam: mpi_adapter_set_wtime swaps the MPI_Wtime source and
+//     NULL restores the host clock
 
 #include <time.h>
 
@@ -448,6 +450,20 @@ static void test_transport_disconnected_wire() {
     mpi_adapter_set_transport(0);
 }
 
+static double fake_wtime(void) { return 1234.5; }
+
+static void test_wtime_seam() {
+    mpi_adapter_set_wtime(&fake_wtime);
+    CHECK(MPI_Wtime() == 1234.5);
+    CHECK(MPI_Wtime() == 1234.5);
+
+    mpi_adapter_set_wtime(0);
+    // Back on the host clock: non-negative and no longer the fake value.
+    double t = MPI_Wtime();
+    CHECK(t >= 0.0);
+    CHECK(t != 1234.5);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -464,5 +480,6 @@ int main() {
     RUN_TEST(test_request_table_exhaustion);
     RUN_TEST(test_transport_wire_crossing);
     RUN_TEST(test_transport_disconnected_wire);
+    RUN_TEST(test_wtime_seam);
     return testfw::summary();
 }
