@@ -7,6 +7,7 @@
 // Loopback transport limits, shared with mpi_core.cpp and exposed for tests.
 #define MPI_ADAPTER_QUEUE_SLOTS 8
 #define MPI_ADAPTER_MAX_PAYLOAD_BYTES 512
+#define MPI_ADAPTER_MAX_REQUESTS 8
 
 #ifdef __cplusplus
 extern "C" {

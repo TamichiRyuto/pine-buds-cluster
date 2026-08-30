@@ -95,6 +95,51 @@ namespace {
         }
         return 0;
     }
+
+    // Nonblocking request table. Handle = slot index + 1, so 0 stays
+    // MPI_REQUEST_NULL.
+    enum RequestKind { kRequestSend, kRequestRecv };
+
+    struct RequestSlot {
+        int in_use;
+        RequestKind kind;
+        int done;
+        void *buf;
+        int source;    // recv: peer to match; send: unused
+        int tag;
+        int owner_rank;  // rank that posted this request
+    };
+
+    RequestSlot g_requests[MPI_ADAPTER_MAX_REQUESTS];
+
+    int alloc_request_slot(void) {
+        for (int i = 0; i < MPI_ADAPTER_MAX_REQUESTS; ++i) {
+            if (!g_requests[i].in_use) {
+                g_requests[i].in_use = 1;
+                return i;
+            }
+        }
+        return -1;
+    }
+
+    // Caller holds the port lock when one is installed.
+    void try_complete(int slot_index) {
+        RequestSlot *slot = &g_requests[slot_index];
+        if (slot->done) {
+            return;
+        }
+        if (slot->kind == kRequestSend) {
+            slot->done = 1;
+            return;
+        }
+        MPI_Status status;
+        if (dequeue_match(slot->owner_rank, slot->source, slot->tag,
+                          slot->buf, &status)) {
+            slot->source = status.MPI_SOURCE;
+            slot->tag = status.MPI_TAG;
+            slot->done = 1;
+        }
+    }
 }
 
 extern "C" void mpi_adapter_bootstrap(int rank, int size) {
@@ -265,4 +310,100 @@ extern "C" int MPI_Allreduce(const void *sendbuf, void *recvbuf, int count,
     }
 
     return MPI_Send(recvbuf, count, datatype, 1, kAllreduceTag + 1, comm);
+}
+
+extern "C" int MPI_Isend(const void *buf, int count, MPI_Datatype datatype,
+                          int dest, int tag, MPI_Comm comm,
+                          MPI_Request *request) {
+    // Eager: perform the same enqueue MPI_Send does now. The message is
+    // copied into the queue, so completion is immediate.
+    int rc = MPI_Send(buf, count, datatype, dest, tag, comm);
+    if (rc != MPI_SUCCESS) {
+        return rc;
+    }
+
+    int slot_index = alloc_request_slot();
+    if (slot_index < 0) {
+        return MPI_ERR_INTERN;
+    }
+    g_requests[slot_index].kind = kRequestSend;
+    g_requests[slot_index].done = 1;
+    g_requests[slot_index].buf = 0;
+    g_requests[slot_index].source = current_rank();
+    g_requests[slot_index].tag = tag;
+    g_requests[slot_index].owner_rank = current_rank();
+    *request = (MPI_Request)(slot_index + 1);
+    return MPI_SUCCESS;
+}
+
+extern "C" int MPI_Irecv(void *buf, int count, MPI_Datatype datatype,
+                          int source, int tag, MPI_Comm comm,
+                          MPI_Request *request) {
+    (void)count;
+    (void)datatype;
+    (void)comm;
+
+    int slot_index = alloc_request_slot();
+    if (slot_index < 0) {
+        return MPI_ERR_INTERN;
+    }
+    g_requests[slot_index].kind = kRequestRecv;
+    g_requests[slot_index].done = 0;
+    g_requests[slot_index].buf = buf;
+    g_requests[slot_index].source = source;
+    g_requests[slot_index].tag = tag;
+    g_requests[slot_index].owner_rank = current_rank();
+    *request = (MPI_Request)(slot_index + 1);
+    return MPI_SUCCESS;
+}
+
+extern "C" int MPI_Wait(MPI_Request *request, MPI_Status *status) {
+    if (*request == MPI_REQUEST_NULL) {
+        return MPI_SUCCESS;
+    }
+
+    int slot_index = (int)*request - 1;
+    RequestSlot *slot = &g_requests[slot_index];
+
+    if (g_port_installed) {
+        g_port.lock();
+        while (!slot->done) {
+            try_complete(slot_index);
+            if (!slot->done) {
+                g_port.wait();
+            }
+        }
+        g_port.unlock();
+    } else {
+        try_complete(slot_index);
+        if (!slot->done) {
+            return MPI_ERR_OTHER;
+        }
+    }
+
+    if (status != 0) {
+        if (slot->kind == kRequestSend) {
+            status->MPI_SOURCE = slot->owner_rank;
+        } else {
+            status->MPI_SOURCE = slot->source;
+        }
+        status->MPI_TAG = slot->tag;
+    }
+
+    slot->in_use = 0;
+    *request = MPI_REQUEST_NULL;
+    return MPI_SUCCESS;
+}
+
+extern "C" int MPI_Waitall(int count, MPI_Request *requests,
+                            MPI_Status *statuses) {
+    int first_rc = MPI_SUCCESS;
+    for (int i = 0; i < count; ++i) {
+        MPI_Status *status = (statuses != 0) ? &statuses[i] : 0;
+        int rc = MPI_Wait(&requests[i], status);
+        if (first_rc == MPI_SUCCESS) {
+            first_rc = rc;
+        }
+    }
+    return first_rc;
 }

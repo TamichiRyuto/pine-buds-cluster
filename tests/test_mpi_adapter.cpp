@@ -20,6 +20,13 @@
 //     MPI_Comm_rank reports each thread's own rank
 // [x] MPI_Allreduce MPI_SUM on floats across 2 ranks (threaded)
 // [x] MPI_Barrier under pthread port: real rendezvous of both ranks
+// [x] MPI_Isend completes eagerly; MPI_Wait on it returns MPI_SUCCESS
+// [x] MPI_Irecv + MPI_Waitall in sequential mode: message already queued
+//     is delivered with status filled
+// [ ] halo-exchange pattern under pthread port: both ranks post Irecv then
+//     Isend then Waitall(2) without deadlock, payloads cross (himeno sendp
+//     shape)
+// [ ] request table exhaustion: starting more requests than slots errors
 
 #include <time.h>
 
@@ -250,6 +257,36 @@ static void test_threaded_barrier_rendezvous() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_isend_irecv_waitall_sequential() {
+    // Send side: eager Isend, then Wait on the send request.
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float out[2] = {3.0f, 4.0f};
+    MPI_Request sreq;
+    CHECK(MPI_Isend(out, 2, MPI_FLOAT, 1, 5, MPI_COMM_WORLD, &sreq) ==
+          MPI_SUCCESS);
+    MPI_Status sstatus;
+    CHECK(MPI_Wait(&sreq, &sstatus) == MPI_SUCCESS);
+    CHECK(sreq == MPI_REQUEST_NULL);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    // Receive side: Irecv finds the queued message at Waitall time.
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float in[2] = {0.0f, 0.0f};
+    MPI_Request rreq;
+    CHECK(MPI_Irecv(in, 2, MPI_FLOAT, 0, 5, MPI_COMM_WORLD, &rreq) ==
+          MPI_SUCCESS);
+    MPI_Status rstatus;
+    CHECK(MPI_Waitall(1, &rreq, &rstatus) == MPI_SUCCESS);
+    CHECK_EQ_F(in[0], 3.0f);
+    CHECK_EQ_F(in[1], 4.0f);
+    CHECK(rstatus.MPI_SOURCE == 0);
+    CHECK(rstatus.MPI_TAG == 5);
+    CHECK(rreq == MPI_REQUEST_NULL);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -261,5 +298,6 @@ int main() {
     RUN_TEST(test_threaded_blocking_recv);
     RUN_TEST(test_threaded_allreduce_sum);
     RUN_TEST(test_threaded_barrier_rendezvous);
+    RUN_TEST(test_isend_irecv_waitall_sequential);
     return testfw::summary();
 }
