@@ -12,6 +12,10 @@ OMPSRC   := $(wildcard adapters/omp/*.cpp)
 TESTBIN  := $(BUILDDIR)/test_gemm
 MPIBIN   := $(BUILDDIR)/test_mpi_adapter
 OMPBIN   := $(BUILDDIR)/test_omp_stub
+BENCHBIN := $(BUILDDIR)/test_gemm_bench
+
+# The benchmark source keeps its omp pragmas even in non-OpenMP builds.
+BENCH_WNO := -Wno-unknown-pragmas
 
 # OpenPineBuds compiles C++ as gnu++98 with these warning/float settings;
 # mirror them on the host so kernel code never drifts off the target dialect.
@@ -23,14 +27,15 @@ TARGET_DIALECT := -std=gnu++98 -Wall -Wextra -Werror -Wdouble-promotion \
 
 check98:
 	@mkdir -p $(BUILDDIR)/check98
-	$(CXX) $(TARGET_DIALECT) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) firmware/pinebuds_compute/compute_main.cpp
+	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp
 	@mv *.o $(BUILDDIR)/check98/
 	@echo "gnu++98 target-dialect check OK"
 
-test: $(TESTBIN) $(MPIBIN) $(OMPBIN) check98
+test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) check98
 	./$(TESTBIN)
 	./$(MPIBIN)
 	./$(OMPBIN)
+	./$(BENCHBIN)
 
 $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
@@ -43,6 +48,11 @@ $(MPIBIN): tests/test_mpi_adapter.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tes
 $(OMPBIN): tests/test_omp_stub.cpp $(OMPSRC) $(wildcard adapters/omp/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Iadapters/omp -Itests tests/test_omp_stub.cpp $(OMPSRC) -o $@
+
+$(BENCHBIN): tests/test_gemm_bench.cpp bench/gemm_mpi_omp.cpp $(MPISRC) $(OMPSRC) $(wildcard adapters/*/*.h) tests/test_framework.h tests/mpi_thread_port.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) $(BENCH_WNO) -pthread -DGEMM_BENCH_NO_MAIN -Iadapters/mpi -Iadapters/omp -Itests \
+		tests/test_gemm_bench.cpp bench/gemm_mpi_omp.cpp $(MPISRC) $(OMPSRC) -o $@
 
 clean:
 	rm -rf $(BUILDDIR)
