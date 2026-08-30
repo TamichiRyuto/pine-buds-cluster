@@ -8,7 +8,7 @@
 // [x] omp_get_num_threads returns 1, omp_get_thread_num returns 0
 // [x] omp_get_max_threads / omp_get_num_procs return 1
 // [x] omp_set_num_threads is accepted and ignored (still 1 thread)
-// [ ] omp_get_wtime: monotonic non-negative seconds
+// [x] omp_get_wtime: monotonic non-negative seconds
 
 #include "test_framework.h"
 
@@ -29,8 +29,18 @@ static void test_thread_capacity_is_one() {
     CHECK(omp_get_num_threads() == 1);
 }
 
+static void test_wtime_monotonic() {
+    double t0 = omp_get_wtime();
+    CHECK(t0 >= 0.0);
+    volatile float sink = 0.0f;
+    for (int i = 0; i < 100000; ++i) sink = sink + 1.0f;
+    double t1 = omp_get_wtime();
+    CHECK(t1 >= t0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
+    RUN_TEST(test_wtime_monotonic);
     return testfw::summary();
 }
