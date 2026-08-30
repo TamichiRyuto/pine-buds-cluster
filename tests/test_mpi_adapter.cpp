@@ -5,8 +5,8 @@
 // before the benchmark calls MPI_Init (on target the IBRT link does this).
 //
 // Test list (t-wada style):
-// [ ] bootstrap + MPI_Init: MPI_Comm_rank/MPI_Comm_size report rank 0 of 2
-// [ ] rank 1 bootstrap: MPI_Comm_rank reports 1 (triangulation)
+// [x] bootstrap + MPI_Init: MPI_Comm_rank/MPI_Comm_size report rank 0 of 2
+// [x] rank 1 bootstrap: MPI_Comm_rank reports 1 (triangulation)
 // [ ] MPI_Initialized: 0 before MPI_Init, 1 after
 // [ ] MPI_Finalize: returns MPI_SUCCESS, MPI_Finalized flips to 1
 // [ ] MPI_Send/MPI_Recv MPI_FLOAT: rank0 -> rank1 payload arrives intact
@@ -33,7 +33,19 @@ static void test_init_rank_size() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_rank1_bootstrap() {
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+
+    int rank = -1;
+    CHECK(MPI_Comm_rank(MPI_COMM_WORLD, &rank) == MPI_SUCCESS);
+    CHECK(rank == 1);
+
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
+    RUN_TEST(test_rank1_bootstrap);
     return testfw::summary();
 }
