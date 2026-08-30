@@ -1,7 +1,18 @@
 # MPI アダプタ IBRT トランスポート設計
 
 対象: `adapters/mpi/` を実機 2 バッズ (左右) に載せるためのトランスポート層設計。
-実装前の設計文書であり、コードはまだ書かない。
+
+> **実装済み注記 (2026-08-31)**: 本設計は実装済み。実装時の確定差分は以下のとおりで、
+> 本文の該当箇所より優先する。
+> 1. `transport.send` / `mpi_frag_send` は **送信元 `src` を明示引数に取る**
+>    (ホストでは 1 プロセス内で 2 ランクが frag 状態を共有するため、固定 self_rank では
+>    送信元を表せない。deliver に dest を明示させたのと同じ理屈)
+> 2. `mpi_frag_init(const mpi_frag_port*)` は self_rank を取らない (1. により不要)
+> 3. **cmdcode は `0x8201` の 1 本のみ**。DATA/ACK はフレームヘッダの kind バイトで
+>    判別済みのため 0x8202 は不要。M-T1 のプローブは kind=3 (PROBE) / 4 (PROBE_ECHO) を
+>    同じ cmdcode に載せ、glue の RX ハンドラで frag に渡さず折り返す
+> 4. M-T1/T2/T3 は別ファーム構成ではなく **1 回の起動で順に実行**する
+> 実装: `adapters/mpi/mpi_frag.{h,cpp}`, `firmware/pinebuds_compute/mpi_ibrt_glue.{h,cpp}`
 
 SDK の記述はすべて `external/OpenPineBuds` 内の実ファイル行を根拠にする。
 `services/ibrt_core/` と `services/ibrt_ui/` は **`Makefile` / `inc` / `lib` しか無く、`src` が存在しない**

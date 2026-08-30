@@ -8,6 +8,7 @@
 
 #include "compute_trace.h"
 #include "gemm_selftest.h"
+#include "mpi_ibrt_glue.h"
 
 namespace {
 
@@ -54,4 +55,9 @@ extern "C" void compute_main(void) {
                       r.fail_j, (int)r.fail_value);
     }
     COMPUTE_TRACE(1, "GEMM elapsed=%u ms", t1 - t0);
+
+    // MPI-over-IBRT bring-up (M-T1/M-T2/M-T3, docs/design-ibrt-transport.md
+    // §9) continues asynchronously on its own compute thread; this call
+    // returns immediately and does not block app_init.
+    mpi_ibrt_glue_start();
 }
