@@ -206,6 +206,7 @@ CMSIS-RTOS v1 RTX (`KERNEL=RTX`; `config/common.mk:822-826`、CPU=m4 のため)�
 | 復旧ツール名 `dld_main` | 公式ページの名称は「Windows based programmer utility」(v1.48)。工場ファームは `AC08_20221102.bin` + `ota_boot_rel_8054309a08.bin` |
 | UART 2 Mbaud (公式仕様として) | 公式 Wiki に baud rate の記載なし。根拠は SDK の `config/open_source/target.mk:370` (`TRACE_BAUD_RATE := 2000000`) |
 | SRAM 992KB | 公式一致。加えて **BT 共有 SRAM 64KB** が別枠で存在 (公式 Wiki) |
+| ケースの USB-UART は CH342DS (公式 Wiki) | 手元の実機は **CH347** (VID:PID 1a86:55da, USB-HiSpeed-SERIAL A/B) だった。ハードリビジョン差とみられる。CH347 の UART も CDC-ACM なので手順への影響なし (2026-08-30 実測) |
 
 ## 10. 次フェーズへの引き継ぎ (nano-MPI + OpenMP 相当に向けて)
 
