@@ -7,7 +7,9 @@ CXXFLAGS := -std=c++17 -Wall -Wextra -Werror -Wdouble-promotion -Wfloat-conversi
 
 BUILDDIR := build
 SRC      := $(wildcard src/*.cpp)
+MPISRC   := $(wildcard adapters/mpi/*.cpp)
 TESTBIN  := $(BUILDDIR)/test_gemm
+MPIBIN   := $(BUILDDIR)/test_mpi_adapter
 
 # OpenPineBuds compiles C++ as gnu++98 with these warning/float settings;
 # mirror them on the host so kernel code never drifts off the target dialect.
@@ -23,12 +25,17 @@ check98:
 	@mv *.o $(BUILDDIR)/check98/
 	@echo "gnu++98 target-dialect check OK"
 
-test: $(TESTBIN) check98
+test: $(TESTBIN) $(MPIBIN) check98
 	./$(TESTBIN)
+	./$(MPIBIN)
 
 $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Itests tests/test_gemm.cpp $(SRC) -o $@
+
+$(MPIBIN): tests/test_mpi_adapter.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tests/test_framework.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -Iadapters/mpi -Itests tests/test_mpi_adapter.cpp $(MPISRC) -o $@
 
 clean:
 	rm -rf $(BUILDDIR)
