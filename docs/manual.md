@@ -43,6 +43,20 @@ cd external/OpenPineBuds
 
 ## 4. 書き込み手順
 
+**WSL2 の場合は先に USB パススルーを設定する。** WSL2 からは USB デバイスが直接
+見えないため、Windows 側で usbipd-win を使ってケース (CH342DS) を渡す:
+
+```powershell
+# Windows (管理者 PowerShell)
+winget install usbipd
+usbipd list                        # CH342 のバス ID を確認
+usbipd bind --busid <BUSID>
+usbipd attach --wsl --busid <BUSID>
+```
+
+WSL 側で `ls /dev/ttyACM*` に 2 ポート (右=ACM0, 左=ACM1 の想定) が出れば OK。
+権限エラーが出る場合は `sudo usermod -aG dialout $USER` 後にシェルを開き直す。
+
 ```bash
 # 1) 既存ファームのバックアップ (フラッシュで消えるため必須。出力は必ず保全する)
 ./backup.sh
