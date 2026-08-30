@@ -23,10 +23,10 @@
 // [x] MPI_Isend completes eagerly; MPI_Wait on it returns MPI_SUCCESS
 // [x] MPI_Irecv + MPI_Waitall in sequential mode: message already queued
 //     is delivered with status filled
-// [ ] halo-exchange pattern under pthread port: both ranks post Irecv then
+// [x] halo-exchange pattern under pthread port: both ranks post Irecv then
 //     Isend then Waitall(2) without deadlock, payloads cross (himeno sendp
 //     shape)
-// [ ] request table exhaustion: starting more requests than slots errors
+// [x] request table exhaustion: starting more requests than slots errors
 
 #include <time.h>
 
@@ -287,6 +287,76 @@ static void test_isend_irecv_waitall_sequential() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+// Himeno sendp-shaped exchange: each rank posts Irecv, then Isend, then
+// Waitall over both — must complete without deadlock, payloads crossing.
+static int g_halo_rc[2] = {-1, -1};
+static float g_halo_in[2] = {0.0f, 0.0f};
+
+static void threaded_halo_body(int rank) {
+    int peer = 1 - rank;
+    float out = (rank == 0) ? 100.0f : 200.0f;
+    float in = 0.0f;
+    MPI_Request reqs[2];
+    MPI_Status stats[2];
+
+    int rc = MPI_Irecv(&in, 1, MPI_FLOAT, peer, 1, MPI_COMM_WORLD, &reqs[0]);
+    if (rc == MPI_SUCCESS) {
+        rc = MPI_Isend(&out, 1, MPI_FLOAT, peer, 1, MPI_COMM_WORLD, &reqs[1]);
+    }
+    if (rc == MPI_SUCCESS) {
+        rc = MPI_Waitall(2, reqs, stats);
+    }
+    g_halo_rc[rank] = rc;
+    g_halo_in[rank] = in;
+}
+
+static void test_threaded_halo_exchange() {
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&threaded_halo_body);
+    CHECK(g_halo_rc[0] == MPI_SUCCESS);
+    CHECK(g_halo_rc[1] == MPI_SUCCESS);
+    CHECK_EQ_F(g_halo_in[0], 200.0f);
+    CHECK_EQ_F(g_halo_in[1], 100.0f);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
+static void test_request_table_exhaustion() {
+    // Fill every request slot as rank 1, then satisfy and drain them so
+    // later tests start with a clean table.
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float in[MPI_ADAPTER_MAX_REQUESTS];
+    MPI_Request reqs[MPI_ADAPTER_MAX_REQUESTS];
+    for (int i = 0; i < MPI_ADAPTER_MAX_REQUESTS; ++i) {
+        in[i] = 0.0f;
+        CHECK(MPI_Irecv(&in[i], 1, MPI_FLOAT, 0, i, MPI_COMM_WORLD,
+                        &reqs[i]) == MPI_SUCCESS);
+    }
+    float dummy = 0.0f;
+    MPI_Request overflow;
+    CHECK(MPI_Irecv(&dummy, 1, MPI_FLOAT, 0, 999, MPI_COMM_WORLD,
+                    &overflow) != MPI_SUCCESS);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float x = 9.0f;
+    for (int i = 0; i < MPI_ADAPTER_MAX_REQUESTS; ++i) {
+        CHECK(MPI_Send(&x, 1, MPI_FLOAT, 1, i, MPI_COMM_WORLD) == MPI_SUCCESS);
+    }
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    MPI_Status stats[MPI_ADAPTER_MAX_REQUESTS];
+    CHECK(MPI_Waitall(MPI_ADAPTER_MAX_REQUESTS, reqs, stats) == MPI_SUCCESS);
+    for (int i = 0; i < MPI_ADAPTER_MAX_REQUESTS; ++i) {
+        CHECK_EQ_F(in[i], 9.0f);
+    }
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -299,5 +369,7 @@ int main() {
     RUN_TEST(test_threaded_allreduce_sum);
     RUN_TEST(test_threaded_barrier_rendezvous);
     RUN_TEST(test_isend_irecv_waitall_sequential);
+    RUN_TEST(test_threaded_halo_exchange);
+    RUN_TEST(test_request_table_exhaustion);
     return testfw::summary();
 }
