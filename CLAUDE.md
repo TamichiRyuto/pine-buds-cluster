@@ -10,7 +10,9 @@ GEMM / Red-Black SOR を分散実行すること。
 ## リポジトリ構成
 
 - `src/` — ターゲット非依存の計算カーネル (freestanding C++)。ホストでも実機でもそのままコンパイルできる純関数のみを置く
-- `tests/` — ホスト側ユニットテスト (g++ でビルドして実行)。TDD はここで回す
+- `adapters/` — 標準 API 互換層。`mpi/` = 自作 MPI サブセット (静的ループバック + 同期 port seam。実機は IBRT を接続)、`omp/` = OpenMP Stage-1 スタブ (逐次)
+- `bench/` — ベンチ形リファレンス。標準 MPI+OpenMP API に対して書かれた無改変ビルド可能なソース (本物の OpenMPI/libgomp でもアダプタでもビルドできる)
+- `tests/` — ホスト側ユニットテスト (g++ でビルドして実行)。TDD はここで回す。`mpi_thread_port.h` = 各ランクを別スレッドで走らせるホスト専用ハーネス
 - `firmware/` — OpenPineBuds への統合層 (パッチ / 追加ファイル / 統合手順)
 - `scripts/` — 環境構築・ビルド・書き込みの補助スクリプト
 - `docs/` — 人間向けマニュアル (HANDOVER §7b の目次に従う)
