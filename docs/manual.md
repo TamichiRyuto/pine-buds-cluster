@@ -73,8 +73,8 @@ backup.sh は**対話式**: 「Please disconnect and reconnect the bud on the ri
 
 ```bash
 
-# 2) 書き込み
-./download.sh
+# 2) 書き込み (bestool はコンテナ内にしか無いので docker 経由で実行する)
+docker compose run --rm builder ./download.sh
 # または手動で (ポートは実機に合わせる):
 #   bestool write-image out/open_source/open_source.bin --port /dev/ttyACM0
 #   bestool write-image out/open_source/open_source.bin --port /dev/ttyACM1

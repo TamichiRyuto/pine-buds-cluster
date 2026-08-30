@@ -32,10 +32,10 @@ make test    # カーネルの単体テスト + gnu++98 方言チェック (80 c
 ./scripts/setup-openpinebuds.sh    # SDK クローン + docker チェック
 ./scripts/install-into-sdk.sh      # カーネル + compute_main を SDK に統合
 cd external/OpenPineBuds
-docker compose run --rm builder ./build.sh    # → out/open_source/open_source.bin
-docker compose run --rm builder ./backup.sh   # 初回フラッシュ前に必須
-./download.sh                                 # 書き込み
-picocom -b 2000000 /dev/ttyACM0               # PASS/FAIL を UART で確認
+docker compose run --rm builder ./build.sh      # → out/open_source/open_source.bin
+docker compose run --rm builder ./backup.sh     # 初回フラッシュ前に必須
+docker compose run --rm builder ./download.sh   # 書き込み (bestool はコンテナ内のみ)
+picocom -b 2000000 /dev/ttyACM0                 # PASS/FAIL を UART で確認
 ```
 
 WSL2 での USB パススルー (usbipd)、バッズの再起動操作、期待出力の読み方、

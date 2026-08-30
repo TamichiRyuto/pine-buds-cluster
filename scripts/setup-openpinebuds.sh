@@ -23,7 +23,6 @@ fi
 
 echo
 echo "Next steps (run inside ${SDK_DIR}):"
-echo "  ./start_dev.sh   # enter dev container"
-echo "  ./build.sh       # build firmware"
-echo "  ./backup.sh      # back up stock firmware BEFORE first flash"
-echo "  ./download.sh    # flash (see docs/manual.md for bud handling)"
+echo "  docker compose run --rm builder ./build.sh      # build firmware"
+echo "  docker compose run --rm builder ./backup.sh     # back up stock firmware BEFORE first flash"
+echo "  docker compose run --rm builder ./download.sh   # flash (see docs/manual.md for bud handling)"
