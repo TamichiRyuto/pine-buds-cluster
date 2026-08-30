@@ -4,6 +4,10 @@
 #ifndef PINEBUDS_ADAPTERS_MPI_ADAPTER_H
 #define PINEBUDS_ADAPTERS_MPI_ADAPTER_H
 
+// Loopback transport limits, shared with mpi_core.cpp and exposed for tests.
+#define MPI_ADAPTER_QUEUE_SLOTS 8
+#define MPI_ADAPTER_MAX_PAYLOAD_BYTES 512
+
 #ifdef __cplusplus
 extern "C" {
 #endif

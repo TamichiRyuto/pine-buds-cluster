@@ -15,9 +15,6 @@ namespace {
     // Survives mpi_adapter_bootstrap (only rank/size/init flags reset there)
     // so a send under one rank can be received after re-bootstrapping as
     // another rank in the same process.
-    const int MPI_ADAPTER_QUEUE_SLOTS = 8;
-    const int MPI_ADAPTER_MAX_PAYLOAD_BYTES = 512;
-
     struct QueueSlot {
         int in_use;
         int source;
@@ -85,6 +82,10 @@ extern "C" int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
     (void)comm;
     int byte_len = count * mpi_datatype_size(datatype);
 
+    if (byte_len > MPI_ADAPTER_MAX_PAYLOAD_BYTES) {
+        return MPI_ERR_COUNT;
+    }
+
     for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
         if (!g_queue[i].in_use) {
             g_queue[i].in_use = 1;
@@ -96,7 +97,7 @@ extern "C" int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
             return MPI_SUCCESS;
         }
     }
-    return MPI_SUCCESS;
+    return MPI_ERR_INTERN;
 }
 
 extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
@@ -116,5 +117,5 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
             return MPI_SUCCESS;
         }
     }
-    return MPI_SUCCESS;
+    return MPI_ERR_OTHER;
 }

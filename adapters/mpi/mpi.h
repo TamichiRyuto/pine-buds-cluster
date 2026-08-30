@@ -11,6 +11,9 @@ typedef int MPI_Comm;
 typedef int MPI_Datatype;
 
 #define MPI_SUCCESS 0
+#define MPI_ERR_COUNT 2
+#define MPI_ERR_OTHER 15
+#define MPI_ERR_INTERN 16
 #define MPI_COMM_WORLD ((MPI_Comm)0)
 #define MPI_FLOAT ((MPI_Datatype)0)
 
