@@ -27,6 +27,13 @@
 //     Isend then Waitall(2) without deadlock, payloads cross (himeno sendp
 //     shape)
 // [x] request table exhaustion: starting more requests than slots errors
+// Transport seam (docs/design-ibrt-transport.md §3, §8):
+// [x] T1 wire connected (threaded): Send crosses the wire (tx counter > 0),
+//     Recv gets the payload via mpi_adapter_deliver
+// [x] T2 wire disconnected (sequential): Send returns the transport error
+//     and nothing lands in the local queue (Recv -> MPI_ERR_OTHER)
+// [x] T6 regression: without a transport installed behavior is unchanged
+//     (covered by every existing test above)
 
 #include <time.h>
 
@@ -357,6 +364,90 @@ static void test_request_table_exhaustion() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+// --- Transport seam tests (fake wire harness) ---
+// The fake wire is what the IBRT glue will be on target: transport.send
+// carries the message to the peer's side and injects it via
+// mpi_adapter_deliver. A tx counter proves the message really went through
+// the wire and not through the local-queue shortcut.
+static int g_wire_tx_count = 0;
+static int g_wire_connected = 1;
+
+static int fake_wire_send(int src, int dest, int tag, const void *buf,
+                          int byte_len) {
+    if (!g_wire_connected) {
+        return MPI_ERR_OTHER;
+    }
+    ++g_wire_tx_count;
+    return mpi_adapter_deliver(src, dest, tag, buf, byte_len);
+}
+
+static int g_transport_recv_rc = -1;
+static float g_transport_recv_val = 0.0f;
+static int g_transport_send_rc = -1;
+
+static void threaded_transport_body(int rank) {
+    if (rank == 1) {
+        float in = 0.0f;
+        MPI_Status status;
+        g_transport_recv_rc =
+            MPI_Recv(&in, 1, MPI_FLOAT, 0, 11, MPI_COMM_WORLD, &status);
+        g_transport_recv_val = in;
+    } else {
+        struct timespec ts = {0, 20L * 1000L * 1000L};
+        nanosleep(&ts, 0);
+        float out = 6.0f;
+        g_transport_send_rc =
+            MPI_Send(&out, 1, MPI_FLOAT, 1, 11, MPI_COMM_WORLD);
+    }
+}
+
+static void test_transport_wire_crossing() {
+    mpi_adapter_transport transport;
+    transport.send = &fake_wire_send;
+    mpi_adapter_set_transport(&transport);
+    g_wire_tx_count = 0;
+    g_wire_connected = 1;
+
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    mpi_thread_port::run_two_ranks(&threaded_transport_body);
+    CHECK(g_transport_send_rc == MPI_SUCCESS);
+    CHECK(g_transport_recv_rc == MPI_SUCCESS);
+    CHECK_EQ_F(g_transport_recv_val, 6.0f);
+    CHECK(g_wire_tx_count > 0);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_set_transport(0);
+}
+
+static void test_transport_disconnected_wire() {
+    mpi_adapter_transport transport;
+    transport.send = &fake_wire_send;
+    mpi_adapter_set_transport(&transport);
+    g_wire_tx_count = 0;
+    g_wire_connected = 0;
+
+    // Sequential mode: a failed wire send must surface the error and must
+    // NOT fall back to the local queue.
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float out = 1.0f;
+    CHECK(MPI_Send(&out, 1, MPI_FLOAT, 1, 12, MPI_COMM_WORLD) ==
+          MPI_ERR_OTHER);
+    CHECK(g_wire_tx_count == 0);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float in = 0.0f;
+    MPI_Status status;
+    CHECK(MPI_Recv(&in, 1, MPI_FLOAT, 0, 12, MPI_COMM_WORLD, &status) ==
+          MPI_ERR_OTHER);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_set_transport(0);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
@@ -371,5 +462,7 @@ int main() {
     RUN_TEST(test_isend_irecv_waitall_sequential);
     RUN_TEST(test_threaded_halo_exchange);
     RUN_TEST(test_request_table_exhaustion);
+    RUN_TEST(test_transport_wire_crossing);
+    RUN_TEST(test_transport_disconnected_wire);
     return testfw::summary();
 }

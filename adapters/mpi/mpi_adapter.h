@@ -29,6 +29,24 @@ typedef struct mpi_adapter_port {
 
 void mpi_adapter_set_port(const mpi_adapter_port *port);
 
+// Message-level send seam (docs/design-ibrt-transport.md §3.1). Once
+// installed, an MPI_Send whose dest is not self skips the local loopback
+// queue entirely and goes only through this send. Deviation from the design
+// doc: send takes an explicit src first parameter, since on target the
+// transport's own identity (not just the calling rank) matters for framing.
+typedef struct mpi_adapter_transport {
+    int (*send)(int src, int dest, int tag, const void *buf, int byte_len);
+} mpi_adapter_transport;
+
+void mpi_adapter_set_transport(const mpi_adapter_transport *transport);
+
+// Receive-side injection point, called from the transport's RX context (on
+// target, the IBRT callback running on BesbtThread rather than the compute
+// thread). Enqueues into the local loopback queue and wakes any waiting
+// MPI_Recv; never blocks beyond the port's own lock.
+int mpi_adapter_deliver(int source, int dest, int tag,
+                        const void *buf, int byte_len);
+
 #ifdef __cplusplus
 }
 #endif

@@ -33,6 +33,13 @@ namespace {
     mpi_adapter_port g_port;
     int g_port_installed = 0;
 
+    // Transport seam: a copy of the caller's struct (mirrors g_port /
+    // g_port_installed above) plus an installed flag. Not installed means
+    // the local loopback queue handles every destination, matching the
+    // original behavior (docs/design-ibrt-transport.md §3.1).
+    mpi_adapter_transport g_transport;
+    int g_transport_installed = 0;
+
     // Calling rank: the port's self_rank() when installed (per-thread
     // identity), else the bootstrap rank g_rank.
     int current_rank(void) {
@@ -175,6 +182,15 @@ extern "C" void mpi_adapter_set_port(const mpi_adapter_port *port) {
     g_port_installed = 1;
 }
 
+extern "C" void mpi_adapter_set_transport(const mpi_adapter_transport *transport) {
+    if (transport == 0) {
+        g_transport_installed = 0;
+        return;
+    }
+    g_transport = *transport;
+    g_transport_installed = 1;
+}
+
 extern "C" int MPI_Comm_rank(MPI_Comm comm, int *rank) {
     (void)comm;
     *rank = current_rank();
@@ -199,6 +215,13 @@ extern "C" int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
 
     if (byte_len > MPI_ADAPTER_MAX_PAYLOAD_BYTES) {
         return MPI_ERR_COUNT;
+    }
+
+    // Transport seam: once installed, a send to a peer (not self) skips the
+    // local loopback queue entirely and goes only through the wire. Self
+    // sends and the no-transport path are untouched below.
+    if (g_transport_installed && dest != current_rank()) {
+        return g_transport.send(current_rank(), dest, tag, buf, byte_len);
     }
 
     if (g_port_installed) {
@@ -234,6 +257,31 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
 
     return dequeue_match(g_rank, source, tag, buf, status) ? MPI_SUCCESS
                                                            : MPI_ERR_OTHER;
+}
+
+// Receive-side injection point for the transport seam. Called from the
+// transport's RX context, which on target is BesbtThread, not the compute
+// thread that owns g_port.self_rank() -- that is why source/dest arrive as
+// explicit arguments here instead of being read from current_rank(). Must
+// never block beyond the short lock below.
+extern "C" int mpi_adapter_deliver(int source, int dest, int tag,
+                                   const void *buf, int byte_len) {
+    if (byte_len > MPI_ADAPTER_MAX_PAYLOAD_BYTES) {
+        return MPI_ERR_COUNT;
+    }
+
+    if (g_port_installed) {
+        g_port.lock();
+        int queued = enqueue_message(source, dest, tag, buf, byte_len);
+        if (queued) {
+            g_port.wake();
+        }
+        g_port.unlock();
+        return queued ? MPI_SUCCESS : MPI_ERR_INTERN;
+    }
+
+    return enqueue_message(source, dest, tag, buf, byte_len) ? MPI_SUCCESS
+                                                              : MPI_ERR_INTERN;
 }
 
 extern "C" int MPI_Barrier(MPI_Comm comm) {
