@@ -11,9 +11,15 @@
 
 namespace {
 
-// Its constructor writing a trace line proves __libc_init_array ran.
+// Static ctors run in __libc_init_array, BEFORE hal_trace_open(), so a
+// TRACE from the ctor is lost (verified on device 2026-08-30). Record a
+// magic value instead and report it later from compute_main(): .bss is
+// zeroed before ctors, so the magic can only appear if the ctor ran.
+const unsigned kCtorMagic = 0xC7B0BEEFu;
+unsigned g_ctor_probe = 0u;
+
 struct GlobalProbe {
-    GlobalProbe() { COMPUTE_TRACE(0, "[ctor] GlobalProbe constructed"); }
+    GlobalProbe() { g_ctor_probe = kCtorMagic; }
 };
 GlobalProbe global_probe;
 
@@ -26,6 +32,12 @@ unsigned current_core_id() {
 }  // namespace
 
 extern "C" void compute_main(void) {
+    if (g_ctor_probe == kCtorMagic) {
+        COMPUTE_TRACE(0, "[ctor] GlobalProbe constructed");
+    } else {
+        COMPUTE_TRACE(1, "[ctor] MISSING: static ctor did not run (probe=0x%x)",
+                      g_ctor_probe);
+    }
     COMPUTE_TRACE(1, "hello, C++ from PineBuds (core=%u)", current_core_id());
 
     const unsigned t0 = compute_tick_ms();
