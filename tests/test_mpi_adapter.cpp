@@ -9,7 +9,10 @@
 // [x] rank 1 bootstrap: MPI_Comm_rank reports 1 (triangulation)
 // [x] MPI_Initialized: 0 before MPI_Init, 1 after
 // [x] MPI_Finalize: returns MPI_SUCCESS, MPI_Finalized flips to 1
-// [ ] MPI_Send/MPI_Recv MPI_FLOAT: rank0 -> rank1 payload arrives intact
+// [x] MPI_Send/MPI_Recv MPI_FLOAT: rank0 -> rank1 payload arrives intact
+// [ ] MPI_Send beyond max payload bytes: rejected with an error (no overflow)
+// [ ] MPI_Send with queue full: rejected with an error (not silent success)
+// [ ] MPI_Recv with no matching message: error (loopback cannot block)
 // [ ] MPI_Barrier: returns MPI_SUCCESS (2-rank sync via loopback transport)
 // [ ] MPI_Wtime: monotonic non-negative float seconds
 // [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks
@@ -65,9 +68,33 @@ static void test_initialized_finalized_flags() {
     CHECK(flag == 1);
 }
 
+static void test_send_recv_float() {
+    // Rank 0 sends; then we re-bootstrap as rank 1 in the same process and
+    // receive. The adapter's loopback queue must survive re-bootstrap.
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float out[3] = {1.0f, 2.0f, 3.0f};
+    CHECK(MPI_Send(out, 3, MPI_FLOAT, 1, 42, MPI_COMM_WORLD) == MPI_SUCCESS);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+
+    mpi_adapter_bootstrap(1, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    float in[3] = {0.0f, 0.0f, 0.0f};
+    MPI_Status status;
+    CHECK(MPI_Recv(in, 3, MPI_FLOAT, 0, 42, MPI_COMM_WORLD, &status) ==
+          MPI_SUCCESS);
+    CHECK_EQ_F(in[0], 1.0f);
+    CHECK_EQ_F(in[1], 2.0f);
+    CHECK_EQ_F(in[2], 3.0f);
+    CHECK(status.MPI_SOURCE == 0);
+    CHECK(status.MPI_TAG == 42);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_init_rank_size);
     RUN_TEST(test_rank1_bootstrap);
     RUN_TEST(test_initialized_finalized_flags);
+    RUN_TEST(test_send_recv_float);
     return testfw::summary();
 }

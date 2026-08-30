@@ -8,9 +8,16 @@ extern "C" {
 #endif
 
 typedef int MPI_Comm;
+typedef int MPI_Datatype;
 
 #define MPI_SUCCESS 0
 #define MPI_COMM_WORLD ((MPI_Comm)0)
+#define MPI_FLOAT ((MPI_Datatype)0)
+
+typedef struct MPI_Status {
+    int MPI_SOURCE;
+    int MPI_TAG;
+} MPI_Status;
 
 int MPI_Init(int *argc, char ***argv);
 int MPI_Comm_rank(MPI_Comm comm, int *rank);
@@ -18,6 +25,10 @@ int MPI_Comm_size(MPI_Comm comm, int *size);
 int MPI_Finalize(void);
 int MPI_Initialized(int *flag);
 int MPI_Finalized(int *flag);
+int MPI_Send(const void *buf, int count, MPI_Datatype datatype, int dest,
+             int tag, MPI_Comm comm);
+int MPI_Recv(void *buf, int count, MPI_Datatype datatype, int source,
+             int tag, MPI_Comm comm, MPI_Status *status);
 
 #ifdef __cplusplus
 }

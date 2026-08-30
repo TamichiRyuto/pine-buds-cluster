@@ -3,11 +3,40 @@
 #include "mpi.h"
 #include "mpi_adapter.h"
 
+#include <string.h>
+
 namespace {
     int g_rank = 0;
     int g_size = 1;
     int g_initialized = 0;
     int g_finalized = 0;
+
+    // In-process loopback transport: a static queue of pending messages.
+    // Survives mpi_adapter_bootstrap (only rank/size/init flags reset there)
+    // so a send under one rank can be received after re-bootstrapping as
+    // another rank in the same process.
+    const int MPI_ADAPTER_QUEUE_SLOTS = 8;
+    const int MPI_ADAPTER_MAX_PAYLOAD_BYTES = 512;
+
+    struct QueueSlot {
+        int in_use;
+        int source;
+        int dest;
+        int tag;
+        int byte_len;
+        char payload[MPI_ADAPTER_MAX_PAYLOAD_BYTES];
+    };
+
+    QueueSlot g_queue[MPI_ADAPTER_QUEUE_SLOTS];
+
+    int mpi_datatype_size(MPI_Datatype datatype) {
+        switch (datatype) {
+            case MPI_FLOAT:
+                return (int)sizeof(float);
+            default:
+                return (int)sizeof(float);
+        }
+    }
 }
 
 extern "C" void mpi_adapter_bootstrap(int rank, int size) {
@@ -48,5 +77,44 @@ extern "C" int MPI_Comm_size(MPI_Comm comm, int *size) {
 
 extern "C" int MPI_Finalize(void) {
     g_finalized = 1;
+    return MPI_SUCCESS;
+}
+
+extern "C" int MPI_Send(const void *buf, int count, MPI_Datatype datatype,
+                         int dest, int tag, MPI_Comm comm) {
+    (void)comm;
+    int byte_len = count * mpi_datatype_size(datatype);
+
+    for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
+        if (!g_queue[i].in_use) {
+            g_queue[i].in_use = 1;
+            g_queue[i].source = g_rank;
+            g_queue[i].dest = dest;
+            g_queue[i].tag = tag;
+            g_queue[i].byte_len = byte_len;
+            memcpy(g_queue[i].payload, buf, byte_len);
+            return MPI_SUCCESS;
+        }
+    }
+    return MPI_SUCCESS;
+}
+
+extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
+                         int source, int tag, MPI_Comm comm,
+                         MPI_Status *status) {
+    (void)comm;
+    (void)count;
+    (void)datatype;
+
+    for (int i = 0; i < MPI_ADAPTER_QUEUE_SLOTS; ++i) {
+        if (g_queue[i].in_use && g_queue[i].dest == g_rank &&
+            g_queue[i].source == source && g_queue[i].tag == tag) {
+            memcpy(buf, g_queue[i].payload, g_queue[i].byte_len);
+            status->MPI_SOURCE = g_queue[i].source;
+            status->MPI_TAG = g_queue[i].tag;
+            g_queue[i].in_use = 0;
+            return MPI_SUCCESS;
+        }
+    }
     return MPI_SUCCESS;
 }
