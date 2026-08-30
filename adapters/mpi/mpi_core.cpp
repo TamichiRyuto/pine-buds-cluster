@@ -127,6 +127,13 @@ extern "C" int MPI_Recv(void *buf, int count, MPI_Datatype datatype,
     return MPI_ERR_OTHER;
 }
 
+extern "C" int MPI_Barrier(MPI_Comm comm) {
+    (void)comm;
+    // Sequential host loopback runs one rank at a time, so there is nothing
+    // to synchronize with; the target IBRT transport implements real sync.
+    return MPI_SUCCESS;
+}
+
 extern "C" double MPI_Wtime(void) {
     return wtime_seconds();
 }

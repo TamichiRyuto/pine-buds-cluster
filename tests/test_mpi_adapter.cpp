@@ -13,7 +13,7 @@
 // [x] MPI_Send beyond max payload bytes: rejected with an error (no overflow)
 // [x] MPI_Send with queue full: rejected with an error (not silent success)
 // [x] MPI_Recv with no matching message: error (loopback cannot block)
-// [ ] MPI_Barrier: returns MPI_SUCCESS (2-rank sync via loopback transport)
+// [x] MPI_Barrier: returns MPI_SUCCESS (real sync deferred to target transport)
 // [x] MPI_Wtime: monotonic non-negative seconds (double signature for API
 //     compatibility; internally single-precision on target)
 // [ ] MPI_Allreduce MPI_SUM on floats across 2 ranks
@@ -129,6 +129,15 @@ static void test_loopback_error_paths() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_barrier_returns_success() {
+    // The sequential host loopback cannot express real synchronization;
+    // Barrier is a no-op here and gains real sync in the target transport.
+    mpi_adapter_bootstrap(0, 2);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    CHECK(MPI_Barrier(MPI_COMM_WORLD) == MPI_SUCCESS);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 static void test_wtime_monotonic() {
     mpi_adapter_bootstrap(0, 2);
     CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
@@ -150,6 +159,7 @@ int main() {
     RUN_TEST(test_initialized_finalized_flags);
     RUN_TEST(test_send_recv_float);
     RUN_TEST(test_loopback_error_paths);
+    RUN_TEST(test_barrier_returns_success);
     RUN_TEST(test_wtime_monotonic);
     return testfw::summary();
 }
