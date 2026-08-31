@@ -19,15 +19,22 @@
 #      would otherwise undo the compute thread's forced OUT_BOX bring-up
 #      (docs/design-ibrt-transport.md §11.2.3/§11.2.4). One-line `if (0 &&
 #      ...)` guards, not #ifdef, to keep the diff minimal and warning-free
+#   7. Patches config/open_source/target.mk to flip CHARGER_PLUGINOUT_RESET
+#      from 1 to 0, so in-case power-on takes the SDK's CHARGING_PWRON path
+#      and still runs BesbtInit (BES's own IBRT targets use 0). Side effect:
+#      charger plug/unplug no longer resets the buds
+#      (docs/design-ibrt-transport.md §12.4)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SDK_DIR="${REPO_ROOT}/external/OpenPineBuds"
 DST="${SDK_DIR}/apps/main"
 APPS_CPP="${DST}/apps.cpp"
+TARGET_MK="${SDK_DIR}/config/open_source/target.mk"
 MARKER="pine-buds-cluster compute hook"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
+CHARGE_MARKER="pine-buds-cluster charging poweron"
 
 [ -d "${DST}" ] || { echo "error: run scripts/setup-openpinebuds.sh first"; exit 1; }
 
@@ -116,6 +123,30 @@ text = text.replace(target2_old, target2_new)
 open(path, "w").write(text)
 EOF
     echo "[ok] in-case TWS hold patched (CLOSE_BOX re-injection + auto-shutdown disabled)"
+fi
+
+if grep -q -- "-DCHARGER_PLUGINOUT_RESET=0" "${TARGET_MK}"; then
+    echo "[ok] ${CHARGE_MARKER}: target.mk already patched"
+else
+    python3 - "${TARGET_MK}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §12.4: KBUILD_CPPFLAGS += is a hard append,
+# so overriding the value from the command line would just redefine the
+# macro -- target.mk itself has to change. The line sits inside a
+# backslash line-continuation, so (unlike the apps.cpp hooks above) no
+# marker comment is inserted here: a bare "#" line would end the
+# continuation early and break the build.
+old = "    -DCHARGER_PLUGINOUT_RESET=1 \\\n"
+new = "    -DCHARGER_PLUGINOUT_RESET=0 \\\n"
+
+text = open(path).read()
+assert text.count(old) == 1, "CHARGER_PLUGINOUT_RESET=1 not unique; re-check"
+text = text.replace(old, new)
+open(path, "w").write(text)
+EOF
+    echo "[ok] pine-buds-cluster charging poweron: CHARGER_PLUGINOUT_RESET 1 -> 0 patched into target.mk"
 fi
 
 echo
