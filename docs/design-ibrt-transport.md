@@ -816,3 +816,408 @@ GEMM-MPI elapsed=<n> ms frames tx=<n> rx=<n> err=0
 6. **rank と IBRT ロールが一致しなくなる。** rank は左右固定、IBRT master はスワップしうる。
    `tws_ctrl_send_cmd` は master/slave どちらからも使えるので転送上は問題ないが、ログ読解時に
    混同しないこと。
+
+### 11.5 finalize 後のクラッシュループ — RTX のスレッド自己終了バグ (Run 2)
+
+修正版 glue での再試験 (Run 2) で、ガード類 (11.2.1 / 11.2.2 / 11.2.5) は設計どおり動作し
+縮退 `size=1` で GEMM-MPI PASS まで到達した。しかし **両バッズ・毎ブートで
+`[mpi] finalize done` の直後 (実測で約 2 秒後にダンプが出力される) に MemFault で
+リセットし、無限のクラッシュループになる**。本項はその根本原因である。
+
+新規に使った手段は逆アセンブルではなく **`nm out/open_source/open_source.elf` による
+シンボル解決**である (ホストの binutils で ELF32 のシンボル表は読める。ARM の逆アセンブルは
+クロスツールチェインが要るので行っていない)。この由来の事実は「**[シンボル解決]**」と明記する。
+
+#### (1) 症状
+
+`~/.claude/handover/artifacts/2026-09-01-0000-pinebuds-ibrt-crash/run2-{left,right}-uart.log`
+(NUL 混在。`tr -d '\0' < file | tr '\r' '\n'` で読む) の全ブートで同一:
+
+```
+[mpi] finalize done rank=0
+### EXCEPTION ###
+PC =002AC1BE, ExceptionNumber=-12
+R4 =2005ABF0, R5 =2005AC34, R6 =2002AA80
+MSP=200A9EB8, PSP=2004DC50
+XPSR=2100000B                          ; IPSR=0x0B = SVCall 実行中
+CFSR =00000082                         ; MMARVALID | DACCVIOL
+MMFAR=00000034, BFAR =00000034
+FaultInfo : (MemFault)
+FaultCause: (Data access violation) (MMFAR valid)
+Possible Backtrace:
+  2AC370  2AA5C0  2AA06E  2AA342
+Current Task    : 0
+New Running Task: 255
+```
+
+周期は電源投入から約 17.5 秒。内訳は「ブート〜`app_init` 末尾 (約 2.5 秒)」+
+「`MPI_IBRT_STACK_TIMEOUT_MS` = 15000 ms の待ち切り」+「GEMM-MPI 約 20 ms」で説明がつく。
+
+#### (2) エビデンスチェーン
+
+**[シンボル解決]** 主要アドレスは以下に落ちる。`stack` 行の値はダンプの Stack 領域に
+生で載っている戻り番地 (Thumb ビット付き) で、`Possible Backtrace` の表示は
+そこから呼び出し命令側へ丸めた値なので 4〜5 小さい。
+
+| 値 | シンボル | 意味 |
+|---|---|---|
+| `PC = 0x002AC1BE` | `rt_switch_req + 0x16` | 例外を起こした命令 |
+| stack `0x002AC375` | `rt_tsk_delete + 0x5c` | 呼び出し元 |
+| stack `0x002AA5C5` | `svcThreadTerminate + 0x14` | 同上 |
+| stack `0x002AA071` | `SVC_Handler + 0x14` | 同上 (IPSR=0x0B と整合) |
+| stack `0x002AA355` | `osThreadExit + 0x0` | 同上 |
+| `R4 = 0x2005ABF0` | `os_idle_TCB` | `p_new` = 次に走る TCB |
+| `R5 = 0x2005AC34` | `os_tsk` | スケジューラの現在/次タスク対 |
+| `R6 = 0x2002AA80` | `os_thread_def_mpi_compute_thread + 0x10` | **落ちたのが我々のスレッド**である証拠 |
+
+これを RTX のソースに突き合わせると、経路が一意に決まる。
+
+1. glue の `mpi_compute_thread` が `MPI_Finalize()` の後にスレッド関数を **`return` で抜けた**
+2. RTX はスレッド生成時に初期スタックの LR スロットへ `osThreadExit` を仕込む
+   (`rtos/rtx/TARGET_CORTEX_M/rt_CMSIS.c:568`
+   `*((uint32_t *)ptcb->tsk_stack + 13) = (uint32_t)osThreadExit;`)。
+   よって return は必ず `osThreadExit()` (`rt_CMSIS.c:724-729`) へ落ち、
+   `__svcThreadTerminate(__svcThreadGetId())` → SVC → `svcThreadTerminate()` (`:584-596`) →
+   `rt_tsk_delete(ptcb->task_id)` (`:592`) と進む
+3. `rt_tsk_delete` の**自己削除**分岐 (`rtos/rtx/TARGET_CORTEX_M/rt_Task.c:227-242`) は
+   `os_tsk.run = NULL;` (`:240`) を代入してから `rt_dispatch(NULL);` (`:241`) を呼ぶ
+4. `rt_dispatch(NULL)` (`rt_Task.c:124-131`) は `next_TCB = rt_get_first(&os_rdy)` で
+   ready 最上位 (この時点では idle しかいない = `R4 = os_idle_TCB`) を取り、
+   `rt_switch_req(next_TCB)` を呼ぶ
+5. `rt_switch_req` (`rt_Task.c:109-120`) は `__RTX_CPU_STATISTICS__` が有効なとき
+   `:114` で **`os_tsk.run->swap_out_time = HWTICKS_TO_MS(rtx_get_hwticks());`** を実行する。
+   `os_tsk.run` は 3 で NULL にされている
+
+`OS_TCB` (`include/rtos/rtx/os_tcb.h:32-74`) の `swap_out_time` オフセットは
+`cb_type/state/prio/task_id` 4 + ポインタ 4 本 16 + `u16` 4 本 8 + `msg` 4 +
+`stack_frame/reserved1/reserved2` 4 + `priv_stack/tsk_stack/stack` 12 + `swap_in_time` 4
+= **0x34** (`std_libspace` は `__CC_ARM` 限定 `:57-60` なので GCC ビルドでは無い)。
+**`MMFAR = 0x00000034` と厳密に一致する。**
+
+`__RTX_CPU_STATISTICS__` は `config/common.mk:848` (`KERNEL=RTX` 分岐) で `=1` に固定されており、
+ビルド設定で外せない。ダンプの `Current Task : 0` は
+`rtx_show_current_thread()` の `os_tsk.run ? os_tsk.run->task_id : 0` (`rt_Task.c:496-498`) で、
+`os_tsk.run == NULL` を独立に裏付ける。`New Running Task: 255` は
+`rt_switch_req` が `:111` で先に書いた `os_tsk.new_tsk` = idle TCB である。
+
+⇒ **BES 版 RTX の潜在バグ。`__RTX_CPU_STATISTICS__` 有効時、スレッドの自己終了は必ず
+MemFault になる。** SDK 内蔵スレッド (`BesbtThread` / `app_thread` など) はすべて
+無限ループで `return` しないため、SDK 側では顕在化しない。
+
+#### (3) 整合性の確認
+
+- **Run 1 (旧 glue) でクラッシュしなかった理由**: 旧 glue は M-T2 のバリアで無限待ちに陥り、
+  スレッド関数が `return` に到達しなかった。11.1(4) と整合する
+- **`apps.cpp` の 2 行パッチ (§11.2.4) は無関係**。落ちているのは RTX のスケジューラであり、
+  `R6` が示すとおり原因スレッドは `mpi_compute` である。対照ビルドは不要 (容疑晴れ)
+- 縮退 (`size=1`) でも通常経路でも `mpi_compute_thread` の末尾は同じなので、
+  **11.2.5 のガードで縮退した場合こそ確実に踏む**。Run 2 で毎ブート再現したのはこのため
+
+#### (4) 対策 (決定済み)
+
+**`mpi_compute_thread` は `return` しない。** `MPI_Finalize()` とサマリ行の後、
+`for (;;) { osDelay(...); }` で永久にパークする。SDK 慣習「スレッドは終了しない」に合わせる。
+
+RTX カーネル側に `if (os_tsk.run)` のガードを入れるパッチは **不採用**。理由は
+SDK パッチ面を最小に保つため (§11.2.4 の方針と同じ) で、かつ我々の側だけで完全に回避できるため。
+
+派生する一般規則として、`firmware/pinebuds_compute/` に今後スレッドを追加する場合も
+**RTOS スレッド関数から `return` してはならない**。この制約はホストテストでは検出できないので
+(ホストの `mpi_thread_port.h` は pthread で、join して正常終了する)、
+実機側の約束事として本節に残す。
+
+実装: `firmware/pinebuds_compute/mpi_ibrt_glue.cpp` の `mpi_compute_thread` 末尾 (適用済み)。
+実機での確認は §12.6 の「`### EXCEPTION ###` が 1 度も出ないこと」で行う。
+
+---
+
+## 12. 充電起動で BT スタックが起動しない問題 (Run 2)
+
+Run 2 では **`bes_bt_main` が一度も起動していなかった**。ケース内での電源投入 =
+充電起動では SDK が BT 起動経路を丸ごと飛ばすためで、現行の
+「ケース内抜き差しで書き込み・実行」手順では **原理的に 2 ランクが成立しない**。
+本節はその原因確定と対策の設計である。§11 の修正設計 (11.2.1〜11.2.5) は
+**すべてそのまま有効**で、本節はその前段 (SDK が IBRT を初期化するところまで進む) を作る。
+
+> **行番号の基準**: 本節の `apps/main/apps.cpp` の行番号は
+> **`scripts/install-into-sdk.sh` 適用前の素の SDK** (`git show HEAD:apps/main/apps.cpp`) に対するもの。
+> §11 は compute hook (`int app_init(void)` = 素の `:1889` の直前に 2 行挿入) 適用後の番号なので、
+> 素の 1889 行目以降について **§11 の値は本節より +2 大きい** (例: §11.1(3) の `:2352` = 本節の `:2350`)。
+> それより前の `:1502` / `:1849` などは両者一致する。
+> パッチのアンカーは行ではなく一意な文字列なので、実装上の影響は無い。
+
+### 12.1 事実確認 — 原因は `is_charging_poweron` ではない
+
+実測ログ (両バッズ・全ブート・Run 2) は必ずこの並びになる。
+
+```
+Yin BATTERY 1
+app_status_indication_set 5
+CHARGING!
+app_key_init_on_charging
+[ctor] GlobalProbe constructed        ← compute_main() は呼ばれている
+...
+[mpi] FAIL stack not ready after 15000 ms (init_done=0 search_ui=0 bonding=0)
+```
+
+`bes_bt_main` / `bt_stack_init_done` / `BesbtInit` / `ibrt_ui_log` の出現回数は
+**両バッズとも 0**。BT スタックスレッドが生成されていない。
+
+#### (1) `Yin BATTERY 1` が全てを決めている
+
+`Yin BATTERY %d` は `apps.cpp:2007` の trace で、値は `nRet = app_battery_open()` (`:2006`)。
+`1` は `APP_BATTERY_OPEN_MODE_CHARGING` (`apps/battery/app_battery.h:57-60` に
+`INVALID (-1)` / `NORMAL (0)` / `CHARGING (1)` / `CHARGING_PWRON (2)`)。
+
+`switch (nRet)` (`apps.cpp:2013`) の `case APP_BATTERY_OPEN_MODE_CHARGING:` (`:2017-2031`) は
+
+```c
+2017    case APP_BATTERY_OPEN_MODE_CHARGING:
+2018      app_status_indication_set(APP_STATUS_INDICATION_CHARGING);
+2019      TRACE(0, "CHARGING!");
+2020      app_battery_start();
+2022      app_key_open(false);
+2023      app_key_init_on_charging();
+2024      nRet = 0;
+2025  #if defined(BT_USB_AUDIO_DUAL_MODE)
+2026        usb_plugin = 1;
+2027  #elif defined(BTUSB_AUDIO_MODE)
+2028        goto exit;
+2029  #endif
+2030        goto exit;
+```
+
+で、**`goto exit` が二重に置かれていて必ず `exit:` (`:2412`) へ飛ぶ**。
+open_source は `BTUSB_AUDIO_MODE ?= 1` (`config/open_source/target.mk:296` →
+`config/common.mk:1328-1329` で `-DBTUSB_AUDIO_MODE`) なので、実際に効くのは `:2028` の側。
+
+飛び越される範囲に **`BesbtInit()` (`:2142`)**、`app_wait_stack_ready()` (`:2143`)、
+`app_bt_start_custom_function_in_bt_thread(..., app_ibrt_init)` (`:2146-2147`) がすべて入る。
+⇒ `BesbtThread` も `app_ibrt_init()` も存在しない。
+
+一方 **`compute_main()` フックは `exit:` より後ろ** (§6 のとおり `:2449` の
+`app_sysfreq_req(..., APP_SYSFREQ_32K)` の直前) なので呼ばれる。
+「BT のログが皆無なのに GEMM-MPI が `size=1` で PASS する」というログの姿はこれで完全に説明できる。
+
+#### (2) `is_charging_poweron` は今回 1 度も立っていない
+
+`is_charging_poweron` (`apps.cpp:1902`) が `true` になるのは
+`case APP_BATTERY_OPEN_MODE_CHARGING_PWRON:` (`:2032-2040`) の `:2035` だけであり、
+**そちらは `goto exit` を持たず、BT 起動へ素通しする**。
+§11.1(3) が挙げた `:2172` / `:2314` / `:2337` の `is_charging_poweron == false` ガードは、
+「BT は上がっているが箱イベントを注入しない」という**別の状態**を指しており、
+Run 2 で我々が踏んだのはそれ以前の段である。
+
+#### (3) どちらの case になるかはコンパイル時に決まる
+
+`app_battery_open()` (`apps/battery/app_battery.cpp:486-562`) の該当箇所:
+
+```c
+542   if (app_battery_charger_indication_open() == APP_BATTERY_CHARGER_PLUGIN) {
+...
+552   #if (CHARGER_PLUGINOUT_RESET == 0)
+553       nRet = APP_BATTERY_OPEN_MODE_CHARGING_PWRON;
+554   #else
+555       nRet = APP_BATTERY_OPEN_MODE_CHARGING;
+556   #endif
+```
+
+`config/open_source/target.mk:386` が `-DCHARGER_PLUGINOUT_RESET=1` を渡している。
+**これが単独の根本原因。**
+
+対照が強い。BES 自身の IBRT ターゲットはいずれも **0** である
+(`config/best2300p_ibrt/target.mk:345`, `config/best2300p_ibrt_anc/target.mk:348`)。
+§2.2 で確定したとおり、**実際にリンクされる IBRT blob は `best2300p_ibrt_anc` 設定で
+コンパイルされている**。つまり `0` の側が blob の前提であり、`1` は open_source ターゲット固有の
+逸脱である。ヘッダのデフォルトも `0` (`app_battery.cpp:65-67` の `#ifndef` 既定値)。
+
+### 12.2 `CHARGER_PLUGINOUT_RESET=1` のもう 1 つの副作用 — 抜き差しでリセット
+
+同じマクロは実行時にも効く。
+
+```c
+/* app_battery.cpp:328-342  status==NORMAL のとき PLUGIN が来た */
+329   if (prams.charger == APP_BATTERY_CHARGER_PLUGIN) {
+334   #if CHARGER_PLUGINOUT_RESET
+335       app_reset();
+336   #else
+337       app_battery_measure.status = APP_BATTERY_STATUS_CHARGING;
+338   #endif
+
+/* app_battery.cpp:364-375  status==CHARGING のとき PLUGOUT が来た */
+369   #if CHARGER_PLUGINOUT_RESET
+370       TRACE(0, "CHARGING-->RESET");
+371       app_reset();
+372   #else
+373       app_battery_measure.status = APP_BATTERY_STATUS_NORMAL;
+374   #endif
+```
+
+`app_reset()` (`apps.cpp:609-612`) は `system_reset()` (`platform/main/main.cpp:109-113`) で
+main スレッドへ signal `0x8` を送り、`main()` のシグナル待ちループ (`main.cpp:311-331`) を
+`sys_case = 2` で抜けさせ、`app_deinit()` (`:337`) → `hal_cmu_sys_reboot()` (`:353`) に至る。
+
+Run 1 の左バッズログがこれを直接示している (ケース外起動 → 再挿入の経路):
+
+```
+app_battery_pluginout_debounce_handler PLUGIN
+CHARGING-->APP_BATTERY_CHARGER :1        ← app_battery.cpp:328
+app_deinit case:0                        ← main.cpp:337、リブート開始
+...（この teardown 中に TWS が張れてしまった）
+[mpi] init rank=1 size=2 role=SLAVE link_wait=1850 ms
+...（約 770 行後にリブート）
+```
+
+**ケースへ戻すと必ずリブートする**。「TWS が張れた唯一の実績」は teardown 中の
+数秒のレースであって、定常状態ではなかった。これが 12.3 で案 B を却下する主要根拠になる。
+
+### 12.3 案の比較
+
+| 軸 | A: `CHARGER_PLUGINOUT_RESET` を 0 にする | A′: `apps.cpp` の `goto exit` を潰す | B: ケース外起動 → 再挿入運用 |
+|---|---|---|---|
+| 確実性 | 高。SDK 自身が持つ CHARGING_PWRON 経路にそのまま乗る | 中。SDK が想定しない状態を作る | **不可**。12.2 の `app_reset()` を必ず踏む |
+| パッチ面 | `config/open_source/target.mk` の定数 **1 文字** | `apps/main/apps.cpp` に新規 1 箇所 | 0 (ただし目的を達しない) |
+| 手順の煩雑さ | 変化なし (ケースに入れるだけ) | 変化なし | 出し入れ + タイミング待ち |
+| リスク | 充電と BT の同時稼働 (12.7)。書き込みトリガが変わる (12.7-3) | 二重初期化、PLUGOUT リセットが残る | UART が取れない、定常状態が無い |
+
+#### 案 B を却下する決定的理由
+
+1. **UART がケース経由でしか出ない。** `docs/manual.md` §4 のとおり usbipd で WSL に渡すのは
+   ケース (CH342DS) 1 台で、`/dev/ttyACM0` = 右 / `ttyACM1` = 左 の 2 ポートはケースが供給する。
+   バッズをケースから出している間は **UART が物理的に繋がらない**。
+   「ケース外で BT を上げている時間帯」は観測できず、M-T1〜M-T3 のログが取れない
+2. **書き込み (bestool) もケース経由でしかできない** (`docs/manual.md` §4)
+3. **再挿入は 12.2 の `app_reset()` を踏む。** リブート後は再び充電起動に戻るので、
+   「BT が上がった状態でケース内にいる」という定常状態が作れない
+4. §11.2.4 対象 1 の CLOSE_BOX 再注入停止パッチは**効かない**。あれは
+   `Auto_Shutdowm_Timerfun` (箱イベント) の話で、`app_reset()` は battery 側の別経路である
+5. B を成立させるには結局 `CHARGER_PLUGINOUT_RESET=0` が必要になる。
+   ⇒ **A の上位互換にならない**
+
+#### 案 A′ を却下する理由
+
+- SDK が想定していない「`APP_BATTERY_STATUS_CHARGING` のまま BT を上げる」状態を作る。
+  `app_battery_start()` が `:2020` と `:2385` で二重に呼ばれ、
+  `app_key_init_on_charging()` (`:2023`) と `app_key_init()` (`:2384`) が両方走る
+- `app_battery_measure.status` が CHARGING のままなので、以降の抜き差しは
+  `app_battery_handle_process_charging` を通り、**12.2 の PLUGOUT リセットがそのまま残る**
+- パッチ面が `apps/main/apps.cpp` に 1 箇所増える。A は既存行の定数 1 文字
+
+**⇒ 案 A を採用する。**
+
+### 12.4 採用案 A — `CHARGER_PLUGINOUT_RESET` を 0 にする
+
+```
+# 対象: config/open_source/target.mk:384-386
+ KBUILD_CPPFLAGS += \
+     -DAPP_AUDIO_BUFFER_SIZE=$(AUDIO_BUFFER_SIZE) \
+-    -DCHARGER_PLUGINOUT_RESET=1 \
++    -DCHARGER_PLUGINOUT_RESET=0 \
+```
+
+`scripts/install-into-sdk.sh` に §11.2.4 と同形のフックを 1 つ追加する。
+マーカーは `pine-buds-cluster charging poweron`、対象は `config/open_source/target.mk`、
+`-DCHARGER_PLUGINOUT_RESET=1` の出現数が 1 であることを assert してから `str.replace` する。
+マクロは `KBUILD_CPPFLAGS +=` でハードに渡されるので、コマンドラインから別値を足すと
+再定義になる。**target.mk を書き換える以外に方法は無い。**
+
+#### 変更後にたどる経路 (すべて実ファイルで裏取り済み)
+
+1. `app_battery_open()` `:542` で PLUGIN 検出 → `:553` `APP_BATTERY_OPEN_MODE_CHARGING_PWRON` (=2)
+2. `apps.cpp:2032-2040` に入る。`TRACE(0, "CHARGING PWRON!")` (`:2033`)、
+   `is_charging_poweron = true` (`:2035`)、`need_check_key = false` (`:2038`)、
+   `nRet = 0` (`:2039`)、`break`。**`goto exit` しない**
+3. `:2049` `app_key_open(false)` を通り、`:2142` `BesbtInit()` →
+   `:2143` `app_wait_stack_ready()` → `:2146-2147` で `app_ibrt_init` を BesbtThread へ投入。
+   ⇒ **§11.2.1 の `mpi_ibrt_stack_ready()` が真になりうる前提がここで初めて成立する**
+4. `need_check_key == false` なので `:2264` で `pwron_case = APP_POWERON_CASE_NORMAL`
+5. `case APP_POWERON_CASE_NORMAL:` (`:2336`) の `:2337` `if (is_charging_poweron == false)` は
+   偽なので、SDK は `IBRT_FETCH_OUT_EVENT` を注入しない。
+   **これは §11.2.3 が自分で注入する設計なので変更不要。**
+   同時に落ちる `startLED_status(1000)` と `once_event_case = 9` のうち、9 のハンドラは
+   `case 9: break;` の空処理 (`once_delay_event_Timer_fun` (`apps.cpp:1560`) の `:1621-1622`)
+   なので実害なし
+6. `:2384-2385` `app_key_init(); app_battery_start();` ⇒ 充電ステートマシンは通常どおり動く
+7. 実行時の抜き差しは `app_battery.cpp:337` / `:373` の代入だけになり、**リブートしなくなる**
+
+#### 変わらないもの
+
+- **§11.2.4 の `apps.cpp` パッチ 2 件はそのまま必要**。
+  `Auto_Shutdowm_Timerfun` の CLOSE_BOX 再注入 (`:1502`) と 5 分自動電源断 (`:1517`) は
+  battery とは別経路で、`CHARGER_PLUGINOUT_RESET` の影響を受けない
+- **§11.2.1〜11.2.5 のすべて**。rank は左右ストラップ、readiness は 2 段、
+  箱イベント注入、bounded wait とガード — 設計は一切変えない
+- `APP_POWERON_CASE_CHARGING` は SDK 内で一度も代入されない
+  (`apps.cpp:66` の enum 値で、参照は `:2437` の `#if defined(BTUSB_AUDIO_MODE)` ブロックのみ)。
+  ⇒ `app_usbaudio_entry()` 経路に迷い込むことはない
+
+### 12.5 実機手順 (人間の操作列)
+
+1. **(初回のみ、NV が空のとき)** 左右をケース外で 1 度ペアリングさせ、`nv_role` を確定させる
+   (§11.4 リスク 4)。以後この手順は不要
+2. `scripts/install-into-sdk.sh` を実行する
+   (compute hook / §11.2.4 の apps.cpp パッチ / 本節 12.4 の target.mk パッチが入る)
+3. ビルドコンテナで `./build.sh`
+4. 両バッズをケースに入れ、ケースを USB で接続し、usbipd で WSL に渡す (`docs/manual.md` §4)
+5. `./download.sh` で右 → 左の順に書き込む。**必ず左右同時に同じバイナリを書く** (§10 リスク 6)
+6. **書き込みトリガに注意**: 旧ファーム (=1) から新ファーム (=0) への 1 回目は
+   「出して 3 秒待って戻す」でリブートが起きるので従来どおり。
+   **2 回目以降は新ファームが抜き差しでリセットしなくなる** (12.2)。
+   リブートを捕捉できないときは `docs/manual.md` §4 の「ケース内で背面ボタン約 5 秒長押し」で
+   強制再起動させる
+7. `picocom -b 2000000 /dev/ttyACM0` と `/dev/ttyACM1` を **両方** 開く
+8. ケースの蓋を閉じ、充電状態のまま放置して 12.6 のログを待つ
+9. 判定後、常用しないこと (§11.4 リスク 3 / 12.7 リスク 5)
+
+### 12.6 期待 UART 出力と合否
+
+SDK 側で**新たに出るべき**行 (これが出なければ 12.4 のパッチが効いていない):
+
+```
+Yin BATTERY 2                            ← apps.cpp:2007 (2 = CHARGING_PWRON)
+CHARGING PWRON!                          ← apps.cpp:2033
+app_wait_stack_ready: wait:<n> ms        ← apps.cpp:597
+bt_stack_init_done:<n>                   ← apps.cpp:2153 (BesbtInit を通った証拠)
+ibrt_ui_log:...                          ← app_ibrt_init() 以降が動いている証拠
+```
+
+`bt_stack_init_done` の値は `pwron_case` (この時点ではまだ `apps.cpp:1897` の初期値
+`APP_POWERON_CASE_INVALID`、または `:1988` で入る `REBOOT`) なので数値は問わない。
+**行が出ること**だけを見る。
+
+その後は **§11.3 の期待出力がそのまま適用される**。合否条件も §11.3 の 4 つ
+(`rank=0` と `rank=1` が片側ずつ / `size=2` / `checksum=32768.000000` 厳密一致 /
+`ibrt_ui_log:tws cmd send failed` が 0 回) に、本節の 2 つを足す。
+
+- `Yin BATTERY 2` / `CHARGING PWRON!` が出ること
+- `[mpi] side=... init_done=1` であること (Run 2 は `init_done=0` だった)
+
+`### EXCEPTION ###` が 1 度も出ないことも併せて確認する (§11.5 の対策の実機確認)。
+
+### 12.7 リスク
+
+1. **充電と BT の同時稼働。** BES 自身の IBRT ターゲット (`best2300p_ibrt` /
+   `best2300p_ibrt_anc`) と同じ設定であり、リンクされる IBRT blob もその設定でビルドされている
+   (§2.2) ので SDK 的には想定内。電力はケース給電で賄われる。ただし蓋を閉じた密閉状態で
+   BT TX + 充電が続くため、**M-T3 は数分で終わらせ、長時間の連続運転はしない**
+2. **満充電で電源が落ちる。** `app_battery_handle_process_charging` の
+   `app_battery_charger_handle_process() <= 0` 分岐 (`app_battery.cpp:388-392`) が
+   `app_shutdown()` を呼ぶ。Run 1 実測で `FULL_CHARGING:4230` の直後にリブートしている。
+   ⇒ 計測は満充電を避けて行う。実測で計測を妨げるようなら §11.2.4 と同形の
+   **任意パッチ対象 4** として `app_battery.cpp:392` の `app_shutdown()` を潰す。
+   §11.2.4 対象 3 と同じ方針で、**まず実測してから足す**
+3. **書き込みトリガが変わる。** 12.5-6 のとおり、新ファームは抜き差しでリセットしなくなるので
+   bestool がリブートを捕捉できなくなる。回避は背面ボタン長押しだが、
+   `__POWERKEY_CTRL_ONOFF_ONLY__` は未定義 (`config/open_source/target.mk:407` でコメントアウト)
+   なので電源キーの UP は `app_bt_key_shutdown` → `app_shutdown()` (`apps.cpp:634-642`) であり、
+   充電中は PMU が即座に再投入する = 結果的にリブートになる。
+   **`docs/manual.md` §4 に注記を足すこと** (本設計のフォローアップ)
+4. **`is_charging_poweron == true` のまま OUT_BOX を作る**。SDK の SM から見れば
+   「充電起動なのにケース外」という想定外状態である。§11.4 リスク 5 と同種のリスクで、
+   失敗は §11.2.5 の bounded wait で必ず UART に落ちる
+5. **ビルド設定を変えたファームは常用しない。** 自動電源断が無効 (§11.4 リスク 3) で、
+   かつ充電中も BT が動き続ける。実験終了後は工場ファーム
+   (`docs/manual.md` §4 のバックアップ) に戻せる状態を保つ
+6. **`CHARGER_PLUGINOUT_RESET` は open_source ターゲット全体に効く。** 本リポジトリは
+   このターゲットしかビルドしないので実害は無いが、SDK を他用途と共有する場合は
+   install スクリプトの適用範囲に注意する
