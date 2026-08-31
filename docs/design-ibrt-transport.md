@@ -1880,8 +1880,11 @@ static void spp_log_thread_body(void const *arg)
 `btif_spp_init_device(dev, 2, ...)` でスタック側スロットは 2 本取り、
 1 本は余裕として残す。
 
-メモリ増分: リング 4096 B + TX スロット 512 B + RX 256 B + スレッドスタック 1024 B +
-状態 ≒ **約 5.9 KB**。§7 の合計 22.7 KB に足しても RAM 残量 (約 330 KB) に対して十分。
+メモリ増分: リング 4096 B + TX スロット 512 B + RX 2688 B + スレッドスタック 1024 B +
+状態 ≒ **約 8.3 KB**。§7 の合計 22.7 KB に足しても RAM 残量 (約 330 KB) に対して十分。
+(2026-09-01 実機訂正: 当初 RX 256 B としていたが、Run 5 で
+`_btif_spp_create_channel` が `rx buffer is too small` を ASSERT。スタックの最小要件は
+`SPP_RECV_BUFFER_SIZE` = `L2CAP_MTU*4` = 2688 B — TOTA (`app_spp_tota.cpp:59`) と同じ)
 
 ---
 
