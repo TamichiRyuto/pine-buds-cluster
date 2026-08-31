@@ -24,6 +24,14 @@
 #      and still runs BesbtInit (BES's own IBRT targets use 0). Side effect:
 #      charger plug/unplug no longer resets the buds
 #      (docs/design-ibrt-transport.md §12.4)
+#   8. Patches services/app_ibrt/src/app_ibrt_search_pair_ui.cpp to neuter
+#      the two box-event timer posts in
+#      app_ibrt_battery_handle_process_normal() (PLUGIN and PLUGOUT
+#      branches), so a debounced charger PLUGIN can no longer inject
+#      IBRT_CLOSE_BOX_EVENT and tear down the TWS link mid-run. Box state
+#      stays owned solely by the MPI glue's forced OUT_BOX (§11.2.3). Same
+#      one-line `if (0 && ...)` guard style as step 6
+#      (docs/design-ibrt-transport.md §12.8)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -31,10 +39,12 @@ SDK_DIR="${REPO_ROOT}/external/OpenPineBuds"
 DST="${SDK_DIR}/apps/main"
 APPS_CPP="${DST}/apps.cpp"
 TARGET_MK="${SDK_DIR}/config/open_source/target.mk"
+SEARCH_PAIR_UI="${SDK_DIR}/services/app_ibrt/src/app_ibrt_search_pair_ui.cpp"
 MARKER="pine-buds-cluster compute hook"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
+BOX_EVENT_MARKER="pine-buds-cluster charger box events"
 
 [ -d "${DST}" ] || { echo "error: run scripts/setup-openpinebuds.sh first"; exit 1; }
 
@@ -105,8 +115,9 @@ path = sys.argv[1]
 # docs/design-ibrt-transport.md §11.2.4: hold TWS up while docked/charging
 # so the compute thread's forced OUT_BOX bring-up (§11.2.3) survives the
 # SDK's own 5 s box-state poll and 5 min auto-shutdown timer. Target 3
-# (charger-plugin box event) is deliberately NOT patched -- §11.2.4 says to
-# add it only if "box event:4" shows up in re-test logs.
+# (charger-plugin box event) is deliberately NOT patched here -- §11.2.4
+# says to add it only if "box event:4" shows up in re-test logs. It did
+# (Run 3, §12.8), so step 8 below patches it in search_pair_ui.cpp.
 target1_old = "  if (app_battery_is_charging()) {"
 target1_new = """  /* pine-buds-cluster in-case TWS hold */
   if (0 && app_battery_is_charging()) {"""
@@ -147,6 +158,37 @@ text = text.replace(old, new)
 open(path, "w").write(text)
 EOF
     echo "[ok] pine-buds-cluster charging poweron: CHARGER_PLUGINOUT_RESET 1 -> 0 patched into target.mk"
+fi
+
+if grep -q "${BOX_EVENT_MARKER}" "${SEARCH_PAIR_UI}"; then
+    echo "[ok] charger box-event patch already present"
+else
+    python3 - "${SEARCH_PAIR_UI}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §12.8: neuter both box-event timer posts in
+# app_ibrt_battery_handle_process_normal() (PLUGIN and PLUGOUT branches) so
+# a debounced charger PLUGIN can no longer inject IBRT_CLOSE_BOX_EVENT and
+# tear down the TWS link mid-run. Box state stays owned solely by the MPI
+# glue's forced OUT_BOX (§11.2.3).
+old = """      if (app_box_handle_timer != NULL) {
+        osTimerStop(app_box_handle_timer);
+        osTimerStart(app_box_handle_timer, 500);
+      }
+"""
+new = """      if (0 && app_box_handle_timer != NULL) { /* pine-buds-cluster charger box events */
+        osTimerStop(app_box_handle_timer);
+        osTimerStart(app_box_handle_timer, 500);
+      }
+"""
+
+text = open(path).read()
+assert text.count(old) == 2, "app_box_handle_timer block not found exactly twice; re-check"
+text = text.replace(old, new)
+open(path, "w").write(text)
+EOF
+    echo "[ok] charger box-event injection patched (PLUGIN + PLUGOUT timer posts disabled)"
 fi
 
 echo
