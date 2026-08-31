@@ -564,3 +564,255 @@ GEMM-MPI elapsed=<n> ms  frames tx=<n> rx=<n> err=0
 8. **`MPI_Wtime` の `double` はソフト float になる** (M4F は単精度 FPU のみ)。
    計測点は 1 回の実行に 2 回だけなので実害は無い見込み。M-T3 で有意なら
    内部 API を `float` 版に切り替える
+
+---
+
+## 11. 実機初回投入の乖離と修正設計 (2026-08-31)
+
+左右両バッズの UART 実測で 3 件の欠陥が確定した。本節が **§6 / §9 / §10 の該当箇所より優先する**。
+新規逆アセンブルの対象は `services/ibrt_core/lib/libtws_ibrt_enhanced_stack_anc_RTX.a` と
+`services/ibrt_ui/lib/libtws_ibrt_enhanced_stack_RTX.a` (ibrt_ui の Makefile は `_anc` を付けない:
+`services/ibrt_ui/Makefile:11-27`)。構造体オフセットは同 `.o` の DWARF で確定した。
+
+### 11.1 事実確認
+
+#### (1) 全 `tws_ctrl_send_cmd(0x8201)` が捨てられ、`link_wait=0 ms` になった
+
+**[逆アセ]** 3 アクセサはいずれも `.bss.g_ibrt_ctrl` の単純フィールド読みだった。DWARF より
+`ibrt_ctrl_t` は byte_size=280、`init_done`=+0 / `nv_role`=+1 / `current_role`=+2 /
+`is_ibrt_search_ui`=+0xa2 / `tws_conhandle`=+0x58 (ヘッダ `services/ibrt_core/inc/app_tws_ibrt.h:193-195`,
+`:210`, `:232` と一致)。
+
+```
+app_tws_ibrt_role_get_callback:    ldrb r0,[r3,#2]      ; = current_role
+app_tws_ibrt_nv_role_get_callback: ldrb r0,[r3,#1]      ; = nv_role
+app_tws_ibrt_tws_link_connected:   ldrh.w r0,[r3,#0x58]; subs r0,#0xFFFF; it ne; movne r0,#1
+                                   ; = (tws_conhandle != 0xFFFF) — besaud を一切見ていない
+app_tws_ibrt_get_bt_ctrl_ctx:      ldr r0,[pc]          ; = &g_ibrt_ctrl (公開ポインタ)
+```
+
+`g_ibrt_ctrl` は **`.bss` = リセット直後ゼロ**。`0 != 0xFFFF` なので
+`app_tws_ibrt_tws_link_connected()` は **初期化前に無条件で TRUE** を返す。0xFFFF を書くのは
+**[逆アセ]** `app_tws_ibrt_init()` (`strh.w r3,[r4,#0x54/#0x58/#0x5c]` r3=0xFFFF、
+`strb r3,[r4,#2]` で current_role=0xff)、そして関数末尾の `movs r3,#1; strb r3,[r4,#0]` =
+**`init_done = 1`**。
+
+順序が決定的である。`app_ibrt_init()` (`apps/main/apps.cpp:1845-1866`、`:1849` で
+`app_tws_ibrt_init()`) は **BesbtThread へ非同期投入される**
+(`apps/main/apps.cpp:2148-2149`)。一方 `compute_main()` フックは main スレッドの
+`app_init` 末尾 (`apps/main/apps.cpp:2452`)。⇒ **計算スレッドが SDK の IBRT 初期化を
+追い越しうる。実測 `link_wait=0 ms` はこれ。**
+
+加えて §2.3 の送信ゲート `app_tws_ibrt_tws_link_connected() && btif_besaud_is_connected()` を
+再確認した。glue の `mpi_ibrt_frag_emit` (`firmware/pinebuds_compute/mpi_ibrt_glue.cpp:192-198`) は
+前者しか見ていない。`btif_besaud_is_connected` の宣言は `services/bt_if_enhanced/inc/besaud_api.h:28`。
+
+#### (2) 両バッズが `rank=0 role=MASTER` になった
+
+`app_tws_is_master_mode()` は `IBRT_MASTER == app_tws_ibrt_role_get_callback(NULL)`
+(`services/app_tws/src/app_tws_if.cpp:594-596`) = **`current_role == 0`**。`IBRT_MASTER` は 0
+(`app_tws_ibrt.h:89`) なので、(1) の `.bss` ゼロ状態では **両側とも MASTER** になる。
+ログの `current_role = 0xff` は `services/app_ibrt/src/app_ibrt_customif_ui.cpp:236` の trace で、
+BES_AUD 接続時 = 我々の読み取りよりずっと後。矛盾ではなく時系列差である。
+
+安定 rank 源の比較:
+
+- **GPIO 左右ストラップ** — `app_tws_is_right_side()` (`services/app_tws/src/app_tws_if.cpp:633`)。
+  `apps/main/apps.cpp:1926` の `app_tws_set_side_from_gpio()` で `app_init` 冒頭に確定し、実体は
+  P1_4 の抵抗ストラップ読み (`config/open_source/tgt_hardware.c:160-171`)。
+  **BT 起動前に確定し、ロールスワップでも不変。**
+- `nv_role` — **[逆アセ]** `app_tws_ibrt_start()` の `ldrb r3,[r5,#0]; strb r3,[r4,#1]` が
+  `config->nv_role` を書く。値は `services/app_ibrt/src/app_ibrt_nvrecord.cpp:42-59` 由来で、
+  未ペアリング時 `IBRT_UNKNOW`。
+- `current_role` — スワップで反転し `.bss` 期は 0=MASTER に化ける。**rank 源にしてはならない。**
+
+⇒ **rank は左右ストラップから採る (右=0 / 左=1)。** NV 実測 (`nv_role 00`=右 / `01`=左) とも
+一致し、§10 リスク 4 が構造的に消える。
+
+#### (3) ケース内で TWS/besaud が張れず、保たない
+
+原因は 3 つ重なっている。
+
+1. **起動時の FETCH_OUT 注入がスキップされる。** ケース内充電起動では
+   `is_charging_poweron = true` (`apps/main/apps.cpp:2034-2038`) となり、
+   `apps/main/apps.cpp:2339` / `:2174` の `if (is_charging_poweron == false)` ブロック
+   — `app_ibrt_ui_event_entry(IBRT_FETCH_OUT_EVENT)` (`:2352` / `:2186`) と
+   `app_ibrt_enter_limited_mode()` — が丸ごと実行されない。
+   `POWER_ON_ENTER_TWS_PAIRING_ENABLED` も 0 (`config/common.mk:2623`) なので
+   `apps.cpp:1861-1863` の TWS_PAIRING 注入も無い。**誰も TWS を開始しない。**
+2. **5 秒ごとに CLOSE_BOX を再注入される。** `Auto_Shutdowm_Timerfun`
+   (`apps/main/apps.cpp:1464`、周期 5000 ms `:1460`) の `:1502-1506` が
+   充電中かつ `box_state != IBRT_IN_BOX_CLOSED` のとき `IBRT_CLOSE_BOX_EVENT` を注入する。
+   **ケースで充電している限り永久に引き戻す。** 実測の `b_sta=IN_BOX_CLOSED,evt=CLOSE_BOX_EVENT`。
+3. **充電器イベントも箱イベントを作る。** PMU IRQ → `apps/battery/app_battery.cpp:707-714` →
+   デバウンス `:421` → user_cb → `app_ibrt_search_pair_ui.cpp:535` → `:496-513` (PLUGIN 分岐) が
+   `box_event` を立て、500 ms タイマ `:73-81` 経由で `app_ibrt_if_event_entry(boxStatus)`。
+
+注入口自体は使える。`app_ibrt_if_event_entry` (`services/app_ibrt/src/app_ibrt_if.cpp:521-535`) は
+**BesbtThread へマーシャリングしてから** `app_ibrt_ui_event_entry` (`services/ibrt_ui/inc/app_ibrt_ui.h:572`)
+を呼ぶので、計算スレッドから安全に呼べる。`app_ibrt_if_false_trigger_protect` は
+`IBRT_SEARCH_UI` 定義時に無条件 `return false` (`app_ibrt_if.cpp:655-656`、
+`config/open_source/target.mk:278` で `IBRT_SEARCH_UI=1`) なので箱状態の整合性チェックで
+弾かれることは無く、`IBRT_SKIP_FALSE_TRIGGER_MASK` は不要。
+
+ただし **[逆アセ]** `app_ibrt_ui_event_entry` は先頭で `ldrb.w r3,[r4,#77]; cmp r3,#0; beq ->`
+`"ibrt_ui_log:entry return directly due to bonding failed"` を行う。DWARF より `app_ibrt_ui_t` は
+byte_size=804、+77 = **`bonding_success`** (`services/ibrt_ui/inc/app_ibrt_ui.h:513`)、
++27 = `box_state` (`:490`)。この 1 を書くのは **[逆アセ]** `app_ibrt_ui_init()` の
+`memset(g_ibrt_ui,0,804)` 直後の `str r2,[r3,#76]` (r2=0x00000100、LE で +77 バイトが 1)。
+⇒ **`app_ibrt_ui_init()` (`apps/main/apps.cpp:1850`) 完了前に注入したイベントは全て黙殺される。**
+`box_state` をアプリ側から直接書く前例は `app_ibrt_search_pair_ui.cpp:669`, `:691`。
+
+`twsif_tws_connected, role 255` は `services/app_tws/src/app_tws_if.cpp:376-379` の trace で、
+**張る能力はあり、再ドッキングで維持できないだけ**であることを示す。
+
+#### (4) rank 0 衝突で M-T2 の Barrier が無限ブロックした
+
+(2) の結果 `size=2` で相手不在となり、`MPI_Recv` が `mpi_ibrt_port_wait()`
+(`mpi_ibrt_glue.cpp:164-171`) の 100 ms タイムアウトを回りつづけた。
+**rank 決定の失敗を検出する仕組みが glue に無い**ことが本質。
+
+### 11.2 修正設計
+
+#### 11.2.1 準備完了述語を 2 段に分ける
+
+`app_tws_ibrt_tws_link_connected()` 単独判定を全廃する。`ibrt_ctrl_t` / `app_ibrt_ui_t` は
+ヘッダで完全公開されており、`app_tws_ibrt_get_bt_ctrl_ctx()` (`app_tws_ibrt.h:295`) と
+`app_ibrt_ui_get_ctx()` (`app_ibrt_ui.h:570`) でポインタを得られる。
+
+```c
+/* stage 1: SDK の app_ibrt_init() を通過したか */
+static int mpi_ibrt_stack_ready(void) {
+    ibrt_ctrl_t   *c = app_tws_ibrt_get_bt_ctrl_ctx();
+    app_ibrt_ui_t *u = app_ibrt_ui_get_ctx();
+    return c->init_done          /* app_tws_ibrt_init() 末尾     apps.cpp:1849 */
+        && c->is_ibrt_search_ui  /* app_tws_ibrt_start(cfg,true)  apps.cpp:1855 */
+        && u->bonding_success;   /* app_ibrt_ui_init()            apps.cpp:1850 */
+}
+/* stage 2: 0x8201 が実際に線に出るか (blob の送信ゲートと同一条件) */
+static int mpi_ibrt_cmd_channel_ready(void) {
+    return mpi_ibrt_stack_ready()
+        && app_tws_ibrt_tws_link_connected()   /* tws_conhandle != 0xFFFF */
+        && btif_besaud_is_connected();         /* besaud_api.h:28 */
+}
+```
+
+`is_ibrt_search_ui` は **[逆アセ]** `app_tws_ibrt_start` の `strb.w r7,[r4,#162]` が
+第 2 引数 (`apps.cpp:1855` は `true`) を書く。
+`mpi_ibrt_frag_emit` と PROBE 送出前のチェックを `mpi_ibrt_cmd_channel_ready()` に差し替える。
+
+#### 11.2.2 rank は左右ストラップから確定する
+
+`app_tws_is_unknown_side()` (`app_tws_if.h:466`) なら FAIL。そうでなければ
+`rank = app_tws_is_right_side() ? 0 : 1`。`app_tws_is_master_mode()` は rank 決定から外し、
+`current_role` はログ表示のみに使う。§10 リスク 4 の「Finalize で再取得して FAIL」は削除する。
+
+#### 11.2.3 ケース内 TWS 確立 — 主: イベント注入 / 従: 直接 page
+
+**主 (a)** — 計算スレッド先頭で順に:
+
+1. `mpi_ibrt_stack_ready()` を 50 ms 間隔で `MPI_IBRT_STACK_TIMEOUT_MS` (既定 15000) まで待つ。
+2. `c->nv_role == IBRT_UNKNOW` なら **注入せず** FAIL 行を出して縮退する。未ペアリングからの
+   TWS 確立は inquiry (`app_ibrt_search_pair_ui.cpp:464-485`) を要し、ケース内では成立しない。
+   ⇒ 手順書に「初回は 1 度だけケース外で左右をペアリングさせる」を明記する。
+3. `app_ibrt_ui_get_ctx()->box_state = IBRT_OUT_BOX;` を書き、
+   `app_ibrt_if_event_entry(IBRT_OPEN_BOX_EVENT)` → 200 ms →
+   `app_ibrt_if_event_entry(IBRT_FETCH_OUT_EVENT)`。これは SDK 自身のケース外起動経路
+   (`apps/main/apps.cpp:2352`) と同じ入口である。
+4. `mpi_ibrt_cmd_channel_ready()` を 50 ms 間隔で `MPI_IBRT_LINK_TIMEOUT_MS`
+   (既定 10000 → **20000** に引き上げ) まで待つ。
+
+**従 (b)** — 4 で 8000 ms 経過しても未確立なら、`c->nv_role == IBRT_MASTER` のバッズ**だけ**が
+`app_tws_ibrt_create_tws_connection(c->config.tws_connection_timeout)` (`app_tws_ibrt.h:298`、
+前例 `services/app_ibrt/src/app_ibrt_auto_test_cmd_handle.cpp:334-336`) を 1 回呼ぶ。
+**[逆アセ]** 同関数は `nv_role != 0` なら `nv_slave_delay_timer` を張って戻るだけで page せず
+(`ldrb r2,[r5,#1]; cbnz r2,...`)、`nv_role == 0` かつ `tws_conhandle == 0xFFFF` のときだけ
+`btif_create_acl_to_slave` に落ちる。**slave 側から呼んでも無意味。** ui SM を経由しないので
+11.2.4 のパッチ無しでは次の CLOSE_BOX で切られる — これが (a) を主とする理由。
+
+#### 11.2.4 install スクリプトによる SDK ソースパッチ (`apps/main/apps.cpp` のみ)
+
+`scripts/install-into-sdk.sh` の既存フック機構 (マーカー + `python3` の `str.replace`、`:60-83`)
+に 1 つ追加する。マーカーは `pine-buds-cluster in-case TWS hold`。いずれも一意なアンカーの
+1 行置換で、`#ifdef` より差分が小さく未使用変数警告も出ない。
+
+```
+# 対象 1 (必須): apps.cpp:1502  — 充電中の CLOSE_BOX 再注入を止める
+-  if (app_battery_is_charging()) {
++  /* pine-buds-cluster in-case TWS hold */
++  if (0 && app_battery_is_charging()) {
+
+# 対象 2 (必須): apps.cpp:1517 — 5 分自動電源断を止める
+-      if (auto_shutdown_cnt == Auto_Shutdowm_TIME / 5) {
++      if (0 && auto_shutdown_cnt == Auto_Shutdowm_TIME / 5) {
+```
+
+対象 2 が要るのは、11.2.3 で `box_state = IBRT_OUT_BOX` にすると `apps.cpp:1508` の条件が真になり、
+モバイル未接続のまま `Auto_Shutdowm_TIME/5 = 60` tick × 5 s = **300 秒で
+`app_bt_power_off_customize()`** が走るため (`services/app_ibrt/inc/app_ibrt_keyboard.h:56`)。
+
+**対象 3 (任意)**: 充電器プラグイン由来の箱イベント (`app_ibrt_search_pair_ui.cpp:496-513`)。
+PMU IRQ は `pmu_charger_set_irq_handler(NULL)` (`apps/battery/app_battery.cpp:709`) で一度きり
+武装解除されるため、ドッキング済み・充電継続中の再発火は考えにくい。
+**まず対象 1+2 だけで再試験し、ログに `box event:4` が出たときに限り追加する。**
+
+#### 11.2.5 ブリングアップガード
+
+どの段でもハングせず必ず 1 行出す。
+
+1. `[mpi] side=%s rank=%d nv_role=%s current_role=%s init_done=%d`
+2. stack readiness 失敗 →
+   `[mpi] FAIL stack not ready after %u ms (init_done=%d search_ui=%d bonding=%d)` → 縮退
+   (`mpi_adapter_bootstrap(0,1)` で M-T3 のみ実行)
+3. cmd channel readiness 失敗 →
+   `[mpi] FAIL cmd channel down after %u ms (link=%d besaud=%d)` → 縮退
+4. **rank ハンドシェイク** — PROBE の byte1 に自 rank を載せ、echo 側は byte1 を自 rank に
+   書き換えて返す (RX ハンドラ `mpi_ibrt_glue.cpp:115-123` に 1 行追加)。判定:
+   2000 ms 以内に echo 無し → `[mpi] FAIL no peer echo` → 縮退 /
+   `peer_rank == self_rank` → `[mpi] FAIL rank collision self=%d peer=%d` → 縮退 /
+   相異なる → `[mpi] peer ok rank=%d peer=%d` で M-T1→M-T2→M-T3 へ進む
+5. **ウォッチドッグ** — `mpi_ibrt_port_wait()` に連続タイムアウトカウンタを持たせ、
+   `MPI_IBRT_STALL_WARN_MS` (既定 5000) 相当を超えたら **1 回だけ**
+   `[mpi] FAIL stalled in MPI op >%u ms rank=%d tx=%u rx=%u err=%u` を出す。MPI の API 契約上
+   ここから抜けることはできないので **検出と報告のみ**。4 を通っていれば到達しない。
+
+### 11.3 期待 UART 出力 (再試験)
+
+右バッズ:
+
+```
+[mpi] side=RIGHT rank=0 nv_role=MASTER current_role=UNKNOW init_done=1
+[mpi] box forced OUT_BOX, injecting OPEN_BOX + FETCH_OUT
+[mpi] init rank=0 size=2 link_wait=<n> ms besaud=1
+[mpi] peer ok rank=0 peer=1
+[mpi-t1] probe len=4 ok rtt=<n> ms ... [mpi-t1] max_payload=<n>
+[mpi] barrier ok
+[mpi] recv from=1 tag=7 val=5.000000
+[mpi] frames tx=<n> rx=<n> err=0
+GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 expect=32768.000000 PASS
+GEMM-MPI elapsed=<n> ms frames tx=<n> rx=<n> err=0
+[mpi] finalize done rank=0
+```
+
+左バッズは `side=LEFT rank=1 nv_role=SLAVE` と `[mpi] send ok`。合格条件は 4 つ:
+`rank=0` と `rank=1` が**片側ずつ**出る / `size=2` / `checksum=32768.000000` 厳密一致 /
+`ibrt_ui_log:tws cmd send failed` が **0 回**。
+
+### 11.4 リスク
+
+1. **`ibrt_ctrl_t` / `app_ibrt_ui_t` を直接読み書きする。** オフセットはヘッダと blob の DWARF で
+   一致を確認済み (280 B / 804 B) だが、ライブラリ差し替えで破綻する。
+   `typedef char chk[(sizeof(ibrt_ctrl_t)==280 && sizeof(app_ibrt_ui_t)==804)?1:-1];` を置いて
+   ビルド時に気付ける形にする。
+2. **`box_state = OUT_BOX` の副作用。** LED/音声インジケーション・探索可能状態・消費電力が
+   「ケース外」相当になる。M-T3 はモバイル未接続で行う (§10 リスク 3 と同じ前提)。
+3. **自動電源断を殺す** (11.2.4 対象 2) ため、このファームを書いたバッズは放置しても電源が
+   落ちない。ケース内で充電されるので実害は無いが、**常用しない**ことを手順書に明記する。
+4. **初回ペアリングは依然ケース外が必要。** `nv_role == IBRT_UNKNOW` からはケース内で TWS を
+   張れない。NV が飛んだら 1 度だけ手動で出し入れする。
+5. **`app_ibrt_ui_event_entry` を我々のタイミングで叩くのは SDK の想定外。** マーシャリング先が
+   BesbtThread (`app_ibrt_if.cpp:530-531`) なのでスレッド安全性はあるが、SM 内部の遷移は追えない。
+   失敗は 11.2.5 の bounded wait で必ず UART に落ちる設計にしてある。
+6. **rank と IBRT ロールが一致しなくなる。** rank は左右固定、IBRT master はスワップしうる。
+   `tws_ctrl_send_cmd` は master/slave どちらからも使えるので転送上は問題ないが、ログ読解時に
+   混同しないこと。
