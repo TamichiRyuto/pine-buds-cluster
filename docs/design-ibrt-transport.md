@@ -1370,3 +1370,990 @@ PLUGOUT 分岐 (`:523-526`) にある同一のタイマ起動ブロック:
   manual §4 は訂正済み
 
 これをもって §11.3 に定義した Phase 1 実機合格条件は **達成**。
+
+---
+
+## 13. Bluetooth SPP ログチャネル設計 (2026-09-01)
+
+目的: GEMM の checksum・elapsed など `COMPUTE_TRACE` 経由のログ行を、Bluetooth で接続した
+Windows PC にリアルタイムで届ける。上位の狙いは「イヤホンとして使いながら裏で並列計算する
+クラスタ」の観測基盤であり、その第一歩として **USB テザー (2 Mbaud UART) を撤廃できる状態**
+を作る。UART 出力は 1 バイトも変えず、SPP は**同じ行を並行して流す tap** として足す。
+
+方式は **SPP (RFCOMM)** で確定済み。根拠は本ビルドの構成そのもので、
+`BLE ?= 0` (`config/open_source/target.mk:213`) と `TOTA ?= 0` (`:215`) によって
+BLE も TOTA も丸ごとコンパイル除外される (`-DTEST_OVER_THE_AIR_ENANBLED` は
+`target.mk:424-429` で `TOTA=1` のときだけ付く) 一方、`services/bt_app/app_spp.cpp` と
+`app_rfcomm_mgr.cpp` は無条件にビルドされており
+(`out/open_source/services/bt_app/app_spp.o`, `app_rfcomm_mgr.o` が存在)、
+その下地となる `btif_spp_*` / `btif_sdp_*` は実際にリンクされる
+`services/bt_if_enhanced/lib/ibrt_libbt_api_sbc_enc_2m_RTX.a` に定義済みである (`nm` 実測、13.1.1)。
+
+前提として引き継ぐ事実:
+
+- 実機 Run 4 (§12.9) で 2 ランク MPI GEMM は合格済み。運用はケース内・充電起動 (`CHARGING PWRON!`)
+- rank=0 = 右バッズが `checksum` / `elapsed` を出す。**v1 は右バッズ 1 台からのストリーム**とし、
+  左 (rank=1) は将来拡張とする
+- MPI は TWS リンク上の cmdcode `0x8201` (§3-§10)。SPP は**モバイル ACL 側**であり別経路
+- PC と PineBuds Pro は既にペアリング済み (どのファーム時点のボンドかは不明)。
+  設計は「既存ボンドでの再接続」と「新規ペアリング」の両方を扱う
+- WSL2 に Bluetooth は無い。受信は Windows 側の仮想 COM ポートで行い、WSL へは
+  `/mnt/c` 配下のファイル経由で渡す (13.7)
+
+---
+
+### 13.1 SDK の SPP API 実仕様
+
+#### 13.1.1 本ビルドに実在する API 面
+
+`nm` 実測 (`services/bt_if_enhanced/lib/ibrt_libbt_api_sbc_enc_2m_RTX.a`) で
+以下がすべて `T` で定義されていることを確認した。
+
+```
+btif_create_spp_device   btif_create_spp_service  btif_spp_init_device
+btif_spp_init_rx_buf     btif_spp_service_setup   btif_spp_open
+btif_spp_open_server     btif_spp_open_client     btif_spp_read
+btif_spp_write           btif_spp_close           btif_spp_disconnect
+btif_spp_get_server_channel  btif_sdp_create_record  btif_sdp_record_setup
+btif_sdp_add_record      btif_me_set_accessible_mode
+```
+
+宣言はすべて `services/bt_if_enhanced/inc/spp_api.h:119-155` と
+`services/bt_if_enhanced/inc/sdp_api.h:482-511` にある。SPP の実行基盤も
+リンク済みで、実 ELF (`out/open_source/open_source.elf`) に
+`create_spp_read_thread` (`0x0c066975`)、静的な `spp_read_thread` (`0x0c0668d5`)、
+`spp_devices` / `spp_read_thread_id` / `spp_mailbox` が入っている。
+デバイス/サービスのプールは各 6 本 (`spp_api.h:25-26`
+`SPP_DEVICE_NUM 6` / `SPP_SERVICE_NUM 6`) で、本ビルドは 1 本も使っていないので全部空いている。
+
+**注意すべき 3 つの穴** (いずれも実測):
+
+1. `app_spp.o` / `app_rfcomm_mgr.o` は**コンパイルされているがリンク後の ELF には残っていない**。
+   `nm out/open_source/open_source.elf | grep -c "app_spp_send_data\|app_rfcomm_open"` = 0。
+   `Makefile:886` の `--gc-sections` が、誰も参照していないので落としている。
+   我々が参照した時点で復活するので使えることに変わりはないが、
+   「.o があるから今も動いている」という読み方は誤り
+2. `bool btif_sppos_is_txpacket_available(struct spp_device *dev)` は `spp_api.h:121` に
+   **宣言だけあってライブラリに定義が無い** (`nm --defined-only` に出ない)。
+   呼ぶとリンクエラーになる。送信可否は自前のフラグで持つ (13.3.4)
+3. `app_spp.cpp:47-75` の `app_spp_send_data()` は `umm_malloc()` (`:61`) で複製した
+   バッファを `btif_spp_write` に渡すが、**成功パスで `umm_free` する経路がどこにも無い**
+   (`:69-72` の失敗時だけ free)。送信のたびにヒープが減る。**使わない**
+
+#### 13.1.2 サービス登録の呼び出し順 (実例: TOTA)
+
+`services/tota/app_spp_tota.cpp:300-351` の `app_spp_tota_init()` が唯一の完全な実例である
+(本ビルドではコンパイルされないが、ソースは読めるし API は上記のとおり実在する)。順序は:
+
+```c
+tota_spp_dev = btif_create_spp_device();                       /* :307 */
+btif_spp_init_rx_buf(tota_spp_dev, rx_buf, SPP_RECV_BUFFER_SIZE); /* :319 */
+mid          = osMutexCreate(osMutex(tota_spp_mutex));          /* :321 */
+tota_spp_dev->creditMutex = osMutexCreate(osMutex(tota_credit_mutex)); /* :326-328 */
+tota_sdp_record = btif_sdp_create_record();                     /* :331 */
+param.attrs = TotaSppSdpAttributes1; param.attr_count = ...;    /* :333-334 */
+param.COD   = BTIF_COD_MAJOR_PERIPHERAL;                        /* :335 */
+btif_sdp_record_setup(tota_sdp_record, &param);                 /* :336 */
+totaSppService = btif_create_spp_service();                     /* :339 */
+totaSppService->rf_service.serviceId = RFCOMM_CHANNEL_TOTA;     /* :341 */
+totaSppService->numPorts = 0;                                   /* :342 */
+btif_spp_service_setup(tota_spp_dev, totaSppService, tota_sdp_record); /* :343 */
+tota_spp_dev->portType = BTIF_SPP_SERVER_PORT;                  /* :345 */
+tota_spp_dev->app_id   = BTIF_APP_SPP_SERVER_TOTA_ID;           /* :346 */
+tota_spp_dev->spp_handle_data_event_func = tota_spp_handle_data_event_func; /* :347 */
+btif_spp_init_device(tota_spp_dev, 5, mid);                     /* :348 */
+btif_spp_open(tota_spp_dev, NULL, spp_tota_callback);           /* :350 */
+```
+
+`app_id` は `services/bt_if_enhanced/inc/bt_if.h:32-42` の
+`BTIF_APP_SPP_SERVER_ID_1..10` から 1 つ選ぶ。`services/bt_app/app_spp.h:36-44` が
+ID_1〜ID_9 を GSound/TOTA/OTA/AI/GREEN/RED/FastPair/TOTA_GENERAL に割り当てているので、
+**`BTIF_APP_SPP_SERVER_ID_10` (`bt_if.h:41`) が唯一の未割当**である。これを使う。
+
+RFCOMM チャネル番号は `spp_api.h:161-172` の `RFCOMM_CHANNEL_1..10` = **10..19**。
+`app_spp.h:55-65` (`#if defined(ENHANCED_STACK)` の中。`ENHANCED_STACK=1` は
+`config/open_source/target.mk:268` → `config/common.mk:1532` で確定) が
+`RFCOMM_CHANNEL_1..9` を既存サービスに割り当てているので、
+**`RFCOMM_CHANNEL_10` (= 19) が未割当**。これを使う。将来 TOTA や FastPair を有効化しても
+チャネルが衝突しない。
+
+#### 13.1.3 コールバックとスレッドコンテキスト [逆アセ]
+
+コールバックは 2 系統ある (`spp_api.h:75-78`)。
+
+| コールバック | 型 | 何が来るか | 実行スレッド |
+|---|---|---|---|
+| `spp_callback_t spp_callback` | `void(*)(spp_device*, spp_callback_parms*)` | CONNECTED / DISCONNECTED / DATA_SENT / *_IND | **`BesbtThread`** |
+| `spp_handle_data_event_func_t spp_handle_data_event_func` | `int(*)(void*, uint8_t, uint8_t*, uint16_t)` | 受信データ | **`spp_read_thread`** |
+
+根拠 **[逆アセ]**: `_btif_sppnew_callback` (`0x0c066cb9`、
+`services/bt_if_enhanced/lib/ibrt_libbt_api_sbc_enc_2m_RTX.a`) がイベントを振り分けており、
+
+- CONNECTED (`0x0c066d64-0c066d7c`)、DISCONNECTED (`0x0c066db8-0c066dd8`)、
+  DATA_SENT (`0x0c066dfc-0c066e1a`) はいずれも `ldr r3,[rX,#0x34]` →
+  `blx r3`、つまり `spp_device.spp_callback` を **RFCOMM のコールバック文脈からそのまま
+  同期呼び出し**している。RFCOMM/L2CAP は `bt_process_stack_events()`
+  (`services/bt_app/besmain.cpp:463`) から回るので、**ここは §2.5 と同じ `BesbtThread`
+  (osPriorityAboveNormal)** である
+- データ受信だけは `0x0c066da8` の `spp_mailbox_put` に積まれ、
+  `spp_read_thread` (`0x0c0668d5`) が `spp_mailbox_get` → `btif_spp_read` →
+  `blx [dev+0x38]` (= `spp_handle_data_event_func`) で処理する
+
+⇒ **接続/切断/TX 完了のハンドラは絶対にブロックできない。** §2.5 で確認したとおり、
+`BesbtThread` を止めると MPI の送受信ポンプ (`besmain.cpp:480-481`) も止まる。
+本設計ではこの 3 つのコールバックで**リングバッファに触らない** (13.3.4)。
+
+DATA_SENT の引数は `spp_callback_parms.p.other` を `struct spp_tx_done*`
+(`spp_api.h:44-47`, `{uint8_t *tx_buf; uint16_t tx_data_length;}`) にキャストして読む。
+実例は `services/bt_app/app_rfcomm_mgr.cpp:150-154`。
+
+#### 13.1.4 送信の契約
+
+| 事項 | 値 | 根拠 |
+|---|---|---|
+| L2CAP MTU | 672 (`__3M_PACK__` 時 980) | `services/bt_app/app_spp.h:26-30` |
+| 1 パケット上限 | `SPP_MAX_DATA_PACKET_SIZE` = 672 | `app_spp.h:33` |
+| 実運用パケット長の前例 | 666 | `services/tota/tota_stream_data_transfer.h:23` |
+| 受信バッファ | `SPP_RECV_BUFFER_SIZE` = 672*4 = 2688 | `app_spp.h:32` |
+| 送信 API | `bt_status_t btif_spp_write(struct spp_device*, char *buffer, uint16_t *nBytes)` | `spp_api.h:134` |
+| 同時 in-flight パケット数 | `btif_spp_init_device(dev, numPackets, mutex)` の第 2 引数 | `spp_api.h:119` |
+| TX バッファの所有権 | **複製されない。DATA_SENT が返るまで呼び出し側が保持する** | 下記 |
+
+TX バッファが複製されない根拠: TOTA は `MAX_SPP_PACKET_SIZE * 5` の静的配列を
+5 スロットのリングとして回し (`tota_stream_data_transfer.cpp:58-61`)、
+`_get_tx_buf_ptr()` にコピーしてから `app_spp_tota_send_data()` →
+`btif_spp_write` に渡し (`:143-146`, `app_spp_tota.cpp:292-298`)、
+スロットの解放を **TX done のセマフォ解放** (`tota_stream_data_transfer.cpp:156`
+`app_tota_tx_done_callback()`、呼び元は `app_spp_tota.cpp:283-284` の
+`BTIF_SPP_EVENT_DATA_SENT`) で行っている。スロット数 5 は
+`btif_spp_init_device(tota_spp_dev, 5, mid)` (`app_spp_tota.cpp:348`) と一致する。
+**この「静的スロット + TX done で返す」形をそのまま踏襲する。**
+
+⇒ §2.3 の `tws_ctrl_send_cmd` (バッファを複製する) とは契約が逆である。
+MPI 側の送信バッファ 1 枚設計 (§7) の理屈を SPP に持ち込んではいけない。
+
+#### 13.1.5 採用する API 面 (決定)
+
+**`btif_spp_*` / `btif_sdp_*` を直接呼ぶ。** `app_spp.cpp` の `app_spp_send_data()` /
+`app_spp_open()` も `app_rfcomm_mgr.cpp` の `app_rfcomm_open()` も使わない。理由:
+
+- `app_spp_send_data()` は 13.1.1-3 のとおりヒープを漏らす
+- `app_rfcomm_mgr.cpp` は ServiceClassIDList を **128 bit カスタム UUID 固定**で組む
+  (`:41-48` の `RFCOMM_NULL_UUID_128` テンプレート + `:288-295` で
+  `ptConfig->rfcomm_128bit_uuid` を埋める)。13.2 のとおり Windows に COM ポートを
+  生やすには `0x1101` が必要なので、この経路では要件を満たせない
+- `btif_*` を直接呼べば **SDK ソースの変更はサービス初期化フック 1 行のみ** (13.8) で済む
+
+---
+
+### 13.2 SDP レコードと UUID の決定
+
+#### 13.2.1 公式仕様側の確認
+
+- SPP の SDP レコードでは `ServiceClassIDList` に **SerialPort UUID `0x1101`** を、
+  `ProtocolDescriptorList` に **L2CAP + RFCOMM (server channel 付き)** を持つことが必須。
+  `BluetoothProfileDescriptorList` (SerialPort `0x1101` / version `0x0102`) は
+  SPP v1.2 以降で必須、`ServiceName` は付けるのが通例
+  (Bluetooth Core SDP 仕様、SPP 仕様 v1.1/v1.2)
+- レコードへの**属性追加は許可されている**ので、カスタム 128 bit UUID を
+  `0x1101` と**併記**するのは適法。ただし `0x1101` を**置き換える**のは不可 ——
+  Windows は SerialPort サービスクラスを見て COM ポートを生やすため
+- Windows は SPP でペアリングしたデバイスに対し**発信 (outgoing) と着信 (incoming) の
+  2 本の仮想 COM ポート**を作る。発信ポートは「開いた瞬間に RFCOMM 接続を張る」挙動
+  (Microsoft の COM Port Emulation の記述)。UI 上の位置は
+  「設定 → Bluetooth とデバイス → デバイス → その他の Bluetooth 設定 → **COM ポート**」
+- SDP キャッシュ: Microsoft Learn は Winsock (`WSALookupServiceBegin`) について
+  「Bluetooth は近傍デバイスの SDP レコードを先読みキャッシュしないし、過去の問い合わせも
+  積極的にはキャッシュしない」「確実に線に出したければ `LUP_FLUSHCACHE` を渡せ」と明記している。
+  **ただしこれは API 層の話で、既存ボンドのデバイスにファーム側が後から SPP サービスを
+  足したとき、設定 UI の COM ポート一覧が自動で追随するかは Microsoft 文書では確認できなかった。**
+  ⇒ **実機確認項目 (13.11-1)**
+- connectable-but-not-discoverable なデバイスに対して発信 COM ポートを作れるかも
+  Microsoft 文書では確認できなかった ⇒ **実機確認項目 (13.11-2)**
+
+#### 13.2.2 決定
+
+**標準 SerialPort UUID `0x1101` を採用し、カスタム 128 bit UUID は使わない。**
+`services/tota/app_spp_tota.cpp:157-160` の `TotaSppClassId` と同型にする。
+COM ポートを自動で生やす条件が公式に取れていない以上、
+「SDP レコードの中身が原因」という変数を最初から消しておくのが最短である。
+サービスの識別は ServiceName 文字列と RFCOMM チャネル番号で足りる。
+
+```c
+/* firmware/pinebuds_compute/spp_log_service.cpp (target-only) */
+
+static const U8 LogSppClassId[] = {                 /* app_spp_tota.cpp:157-160 と同型 */
+    SDP_ATTRIB_HEADER_8BIT(3),                      /* sdp_api.h:160 */
+    SDP_UUID_16BIT(SC_SERIAL_PORT),                 /* 0x1101  sdp_api.h:271, :192 */
+};
+
+static const U8 LogSppProtoDescList[] = {           /* app_spp_tota.cpp:162-186 と同型 */
+    SDP_ATTRIB_HEADER_8BIT(12),
+    SDP_ATTRIB_HEADER_8BIT(3),
+    SDP_UUID_16BIT(PROT_L2CAP),                     /* 0x0100  sdp_api.h:358 */
+    SDP_ATTRIB_HEADER_8BIT(5),
+    SDP_UUID_16BIT(PROT_RFCOMM),                    /* 0x0003  sdp_api.h:339 */
+    SDP_UINT_8BIT(RFCOMM_CHANNEL_LOG),              /* = RFCOMM_CHANNEL_10 = 19  sdp_api.h:223 */
+};
+
+static const U8 LogSppProfileDescList[] = {         /* app_spp_tota.cpp:191-199 と同型 */
+    SDP_ATTRIB_HEADER_8BIT(8),
+    SDP_ATTRIB_HEADER_8BIT(6),
+    SDP_UUID_16BIT(SC_SERIAL_PORT),
+    SDP_UINT_16BIT(0x0102),                         /* SPP v1.2  sdp_api.h:227 */
+};
+
+static const U8 LogSppServiceName[] = {             /* app_spp_tota.cpp:204-210 と同型 */
+    SDP_TEXT_8BIT(12),                              /* sdp_api.h:247 */
+    'P','i','n','e','B','u','d','s','L','o','g','\0'
+};
+
+static sdp_attribute_t LogSppSdpAttributes[] = {
+    SDP_ATTRIBUTE(AID_SERVICE_CLASS_ID_LIST,   LogSppClassId),       /* sdp_api.h:362, :148 */
+    SDP_ATTRIBUTE(AID_PROTOCOL_DESC_LIST,      LogSppProtoDescList), /* sdp_api.h:365 */
+    SDP_ATTRIBUTE(AID_BT_PROFILE_DESC_LIST,    LogSppProfileDescList),/* sdp_api.h:370 */
+    SDP_ATTRIBUTE((AID_SERVICE_NAME + 0x0100), LogSppServiceName),   /* sdp_api.h:375 */
+};
+```
+
+初期化本体 (13.1.2 の順序をそのまま踏襲):
+
+```c
+static struct spp_device  *s_dev;
+static struct spp_service *s_service;
+static btif_sdp_record_t  *s_record;
+static uint8_t             s_rx_buf[256];   /* 受信は使わないが btif_spp_init_rx_buf は必須 */
+
+osMutexDef(spp_log_mutex);
+osMutexDef(spp_log_credit_mutex);
+
+extern "C" void spp_log_service_init(void)      /* BesbtThread 上で 1 回だけ (13.8) */
+{
+    btif_sdp_record_param_t param;
+
+    s_dev = btif_create_spp_device();
+    btif_spp_init_rx_buf(s_dev, s_rx_buf, sizeof(s_rx_buf));
+    s_dev->creditMutex = osMutexCreate(osMutex(spp_log_credit_mutex));
+
+    s_record = btif_sdp_create_record();
+    param.attrs      = &LogSppSdpAttributes[0];
+    param.attr_count = ARRAY_SIZE(LogSppSdpAttributes);
+    param.COD        = BTIF_COD_MAJOR_PERIPHERAL;   /* 0x00000500  me_api.h:559 */
+    btif_sdp_record_setup(s_record, &param);        /* sdp_api.h:488 */
+
+    s_service = btif_create_spp_service();
+    s_service->rf_service.serviceId = RFCOMM_CHANNEL_LOG;
+    s_service->numPorts             = 0;
+    btif_spp_service_setup(s_dev, s_service, s_record);
+
+    s_dev->portType                 = BTIF_SPP_SERVER_PORT;   /* spp_api.h:37 */
+    s_dev->app_id                   = BTIF_APP_SPP_SERVER_ID_10;  /* bt_if.h:41 */
+    s_dev->spp_handle_data_event_func = spp_log_rx_discard;
+    btif_spp_init_device(s_dev, SPP_LOG_TX_SLOTS /* = 2 */,
+                         osMutexCreate(osMutex(spp_log_mutex)));
+    btif_spp_open(s_dev, NULL, spp_log_callback);   /* NULL = server, 待ち受け */
+}
+```
+
+受信は使わないので `spp_log_rx_discard()` は `return 0;` だけ置く
+(登録しないと `spp_read_thread` の `[dev+0x38]` が NULL で、逆アセ上は
+`0x0c06694a-0c066950` の `cbz` で無視されるだけだが、明示しておく)。
+
+---
+
+### 13.3 ログタップの構造
+
+#### 13.3.1 方針
+
+**SDK の TRACE 全量は流さない。`COMPUTE_TRACE` を通った行だけを流す。**
+`firmware/pinebuds_compute/compute_trace.h:14` の定義を 2 段にする。
+
+```c
+#ifdef PINEBUDS_TARGET
+#include "hal_timer.h"
+#include "hal_trace.h"
+void compute_log_tap(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#define COMPUTE_TRACE(nargs, fmt, ...)          \
+    do {                                        \
+        TRACE(nargs, fmt, ##__VA_ARGS__);       \
+        compute_log_tap(fmt, ##__VA_ARGS__);    \
+    } while (0)
+#else
+/* ホスト側は現行のまま printf。tap はホストでは存在しない */
+#define COMPUTE_TRACE(nargs, fmt, ...) std::printf(fmt "\n", ##__VA_ARGS__)
+#endif
+```
+
+`compute_log_tap` は `vsnprintf` で 1 行を組む。これは新規の依存ではない ——
+SDK の `TRACE` 自身が `hal_trace_printf` → `hal_trace_format_va()` →
+`vsnprintf` (`platform/hal/hal_trace.c:1113-1118`) を通っており、
+`vsnprintf` / `snprintf` は実 ELF に既にリンクされている (`nm` 実測)。
+既存の `COMPUTE_TRACE` 呼び出しは `%f` を一切使わず整数に落としてある
+(`firmware/pinebuds_compute/compute_main.cpp:48-50` のコメントのとおり)
+ので、浮動小数変換のスタック/ヒープ挙動を踏まない。**この制約は §13 でも維持する。**
+
+なお `hal_trace.c:1119-1123` により UART 側は `TRACE_CRLF` で `\r\n` が付く。
+SPP 側は `\n` のみとし、受信側での正規化を不要にする (13.6)。
+
+#### 13.3.2 リングバッファ (ターゲット非依存の純ロジック)
+
+配置は **`firmware/pinebuds_compute/log_ring.{h,cpp}`**。理由:
+
+- リポジトリ規約 (`CLAUDE.md`) では `src/` は「ターゲット非依存の**計算カーネル**、純関数のみ」。
+  リングバッファは状態を持つので `src/` の定義に合わない
+- `adapters/` は「標準 API 互換層」であり、これも該当しない
+- `firmware/pinebuds_compute/` は統合層だが、`log_ring.{h,cpp}` は **SDK ヘッダを一切
+  include しない**ので `tests/` から `g++` で直接コンパイルできる。`Makefile` の
+  `TARGET_DIALECT` は既に `-Ifirmware/pinebuds_compute` を持っているため
+  `check98` にもそのまま乗る
+
+```c
+/* firmware/pinebuds_compute/log_ring.h — gnu++98 / freestanding / ヒープ無し */
+enum { LOG_RING_CAPACITY = 4096 };   /* 2 のべき乗 (& (CAP-1) でインデックス) */
+
+struct log_ring {
+    char     buf[LOG_RING_CAPACITY];
+    unsigned free_pos;    /* 絶対位置。ここより前は破棄済み */
+    unsigned write_pos;   /* 絶対位置。次に書く場所 */
+    unsigned dropped;     /* 捨てた行数 (累積) */
+};
+
+void     log_ring_init(struct log_ring *r);
+
+/* 1 行を積む (末尾の '\n' は log_ring 側で付ける)。
+   空きが足りなければ足りるまで最古の行を丸ごと捨て、そのたび dropped++。
+   積めたら 1。len+1 > LOG_RING_CAPACITY なら何も捨てずに 0 を返し dropped++。 */
+int      log_ring_push(struct log_ring *r, const char *line, unsigned len);
+
+/* 送信用に最大 max バイトを dst にコピーする。消費はしない (const)。
+   *base_out にコピー開始の絶対位置を返す。行の途中で切ってよい
+   (SPP はバイトストリームであり、行境界は受信側の '\n' で回復する)。 */
+unsigned log_ring_peek(const struct log_ring *r, char *dst, unsigned max,
+                       unsigned *base_out);
+
+/* base から n バイトが確かに送れたことを確定する。
+   free_pos = max(free_pos, base + n) (符号なし差分比較)。
+   push 側の drop で既に free_pos が追い越していれば no-op。 */
+void     log_ring_commit(struct log_ring *r, unsigned base, unsigned n);
+
+unsigned log_ring_used(const struct log_ring *r);
+unsigned log_ring_take_dropped(struct log_ring *r);  /* 読んで 0 に戻す */
+```
+
+設計上のキモは **`peek` が何も動かさない**ことである。SPP の TX バッファは
+DATA_SENT まで生かす必要がある (13.1.4) が、その間もリングは押し出され続けてよい。
+`commit(base, n)` を「絶対位置での前進のみ」にしておけば、
+in-flight 中に drop-oldest で `free_pos` が追い越しても整合が壊れない。
+所有権も単純になる:
+
+- **producer** (`log_ring_push`) — `compute` スレッドと `BesbtThread` (glue の RX ハンドラ)
+- **consumer** (`peek` / `commit` / `take_dropped`) — ログ送信スレッドのみ
+
+#### 13.3.3 タップ本体
+
+```c
+static struct log_ring s_ring;
+static osMutexId       s_ring_mid;
+static osThreadId      s_log_tid;
+static unsigned        s_seq;
+static unsigned        s_contended;   /* try-lock に失敗して捨てた行数 */
+
+extern "C" void compute_log_tap(const char *fmt, ...)
+{
+    char    line[192];
+    va_list ap;
+    int     n;
+
+    if (s_log_tid == NULL) return;                 /* 初期化前 */
+    if (osMutexWait(s_ring_mid, 0) != osOK) {      /* 0 = 待たない (cmsis_os.h:550) */
+        s_contended++;                             /* 統計だけ取って戻る */
+        return;
+    }
+    n = snprintf(line, sizeof line, "#%u ", s_seq);
+    va_start(ap, fmt);
+    n += vsnprintf(line + n, sizeof(line) - (unsigned)n, fmt, ap);
+    va_end(ap);
+    if (n > 0) {
+        if (n > (int)sizeof(line) - 1) n = (int)sizeof(line) - 1;
+        s_seq++;
+        log_ring_push(&s_ring, line, (unsigned)n);
+    }
+    osMutexRelease(s_ring_mid);
+    osSignalSet(s_log_tid, 0x1);                   /* cmsis_os.h:497 */
+}
+```
+
+**`osMutexWait(..., 0)` の try-lock がこの設計の要である。**
+`compute` スレッド (osPriorityBelowNormal、§6) も `BesbtThread` (osPriorityAboveNormal、§2.5)
+も**一切待たない**。取れなければその行を落として `s_contended++` するだけなので、
+GEMM のタイミングにも BT スタックにも待ちを持ち込まない。
+`osSignalSet` は別スレッドから呼んで安全 (`cmsis_os.h:52-65`、§2.7 と同じ根拠)。
+
+#### 13.3.4 送信ステートマシン
+
+送信は専用スレッドが回す。**`BesbtThread` 上では `btif_spp_write` を呼ばず、
+リングにも触らない。**
+
+```c
+osThreadDef(spp_log_thread, osPriorityLow, 1, 1024, "spp_log");  /* cmsis_os.h:165, :347-356 */
+
+enum { SPP_LOG_CHUNK = 512 };          /* < L2CAP_MTU 672 (app_spp.h:29) */
+static char     s_tx_slot[SPP_LOG_CHUNK];
+static volatile int      s_connected;
+static volatile int      s_inflight;
+static volatile unsigned s_done_len;   /* BesbtThread が書き、log スレッドが読む */
+static unsigned          s_inflight_base;
+static unsigned          s_inflight_len;
+```
+
+`spp_log_callback` (= `spp_device.spp_callback`、**`BesbtThread`**):
+
+```c
+static void spp_log_callback(struct spp_device *dev, struct spp_callback_parms *info)
+{
+    switch (info->event) {
+    case BTIF_SPP_EVENT_REMDEV_CONNECTED:        /* spp_api.h:29 */
+        s_connected = 1; s_inflight = 0;
+        TRACE(0, "[spplog] connected");
+        break;
+    case BTIF_SPP_EVENT_REMDEV_DISCONNECTED:     /* spp_api.h:30 */
+        s_connected = 0; s_inflight = 0;
+        TRACE(0, "[spplog] disconnected");
+        break;
+    case BTIF_SPP_EVENT_DATA_SENT: {             /* spp_api.h:31 */
+        struct spp_tx_done *d = (struct spp_tx_done *)info->p.other;  /* spp_api.h:44-47 */
+        s_done_len = d->tx_data_length;
+        s_inflight = 0;
+        break;
+    }
+    default: break;
+    }
+    osSignalSet(s_log_tid, 0x1);   /* 実処理はログスレッドへ */
+}
+```
+
+ログスレッド:
+
+```c
+static void spp_log_thread_body(void const *arg)
+{
+    for (;;) {
+        osSignalWait(0x1, 200);            /* 200 ms でも起きる = access mode 再アーム周期 */
+        spp_log_rearm_access_mode();       /* 13.4 */
+
+        if (s_inflight) continue;
+        if (s_inflight_len) {              /* 直前の送信を確定 */
+            log_ring_commit(&s_ring, s_inflight_base,
+                            s_done_len < s_inflight_len ? s_done_len : s_inflight_len);
+            s_inflight_len = 0;
+        }
+        if (!s_connected) continue;
+
+        unsigned d = log_ring_take_dropped(&s_ring);
+        unsigned n;
+        if (d != 0) {
+            /* drop マーカは単独チャンクで送る。リングは 1 バイトも消費しない */
+            n = (unsigned)snprintf(s_tx_slot, sizeof s_tx_slot,
+                                   "#- [log] dropped=%u contended=%u\n", d, s_contended);
+            s_inflight_base = 0; s_inflight_len = 0;
+        } else {
+            osMutexWait(s_ring_mid, osWaitForever);      /* log スレッドだけは待ってよい */
+            n = log_ring_peek(&s_ring, s_tx_slot, sizeof s_tx_slot, &s_inflight_base);
+            osMutexRelease(s_ring_mid);
+            s_inflight_len = n;
+        }
+        if (n == 0) continue;
+
+        uint16_t len = (uint16_t)n;
+        s_inflight = 1;
+        if (btif_spp_write(s_dev, s_tx_slot, &len) != BT_STS_SUCCESS) {
+            s_inflight = 0; s_inflight_len = 0;          /* 次の周期で再試行 */
+        }
+    }
+}
+```
+
+優先度は **`osPriorityLow` (`cmsis_os.h:165`)**。`compute` スレッド
+(osPriorityBelowNormal、§6-2) より下に置く。GEMM は 13 ms (§12.9) で終わるので
+計算中に送信が止まっても実害は無く、むしろ **GEMM の `elapsed` に SPP 送信の摂動を
+乗せない**ことを優先する。in-flight は 1 本 (`s_inflight`)、
+`btif_spp_init_device(dev, 2, ...)` でスタック側スロットは 2 本取り、
+1 本は余裕として残す。
+
+メモリ増分: リング 4096 B + TX スロット 512 B + RX 256 B + スレッドスタック 1024 B +
+状態 ≒ **約 5.9 KB**。§7 の合計 22.7 KB に足しても RAM 残量 (約 330 KB) に対して十分。
+
+---
+
+### 13.4 接続可能モード (page scan) の設計
+
+#### 13.4.1 事実 — Run 4 では MPI 完了後に非接続可能になる
+
+Run 4 の右バッズログ (`run4-right-uart.log`) から:
+
+```
+685: j_scan=OPEN_BOX,    l_type=NO_LINK_TYPE, mode=0x2, p_mode=0
+687: ibrt_ui_log:set_access_mode=2, ca=0xc05341f
+689: write_scan_enable=2
+...
+817: ibrt_ui_log:set_access_mode=0, ca=0xc05141b
+819: write_scan_enable=0
+823: j_scan=CONNECTED,   l_type=TWS_LINK, mode=0x0, p_mode=0
+827: ibrt_ui_log:filter access mode=0, current access mode=0
+```
+
+`ca=` は呼び出し元アドレスであり、実 ELF のシンボル表で解決すると:
+
+| `ca` | 解決先 |
+|---|---|
+| `0xc05341f` | `app_ibrt_ui_open_box_event_handler+0x19` |
+| `0xc05141b` | `app_ibrt_ui_judge_scan_type+0x286` |
+| `0xc0552a7` | `app_ibrt_ui_global_handler+0x1b6` |
+| `0xc059303` | `app_tws_ibrt_create_tws_connection+0x2d` |
+| `0xc058f99` | `app_tws_ibrt_delay_slave_create_connection+0x1b` |
+
+値の意味は `services/bt_if_enhanced/inc/me_api.h:382-392`:
+`BTIF_BAM_NOT_ACCESSIBLE 0x00` (`:384`) / `BTIF_BAM_DISCOVERABLE_ONLY 0x01` (`:390`) /
+`BTIF_BAM_CONNECTABLE_ONLY 0x02` (`:389`) / `BTIF_BAM_GENERAL_ACCESSIBLE 0x03` (`:385-386`)。
+bit0 = inquiry scan (discoverable)、bit1 = page scan (connectable) で
+HCI `Write_Scan_Enable` (`services/bt_profiles_enhanced/inc/hci.h:920` `0x0C1A`) の
+パラメータに 1:1 対応する。
+
+⇒ **TWS リンク確立後、右バッズは `mode=0x0` = page scan も inquiry scan も止まる。
+この状態では PC からは繋がらない。**
+
+**[逆アセ]** `app_ibrt_ui_judge_scan_type` (`0x0c051195`、宣言は
+`services/ibrt_ui/inc/app_ibrt_ui.h:619`) は
+`app_ibrt_ui_inqscan_enable_needed()` (`:618`) の結果を bit0、
+`app_ibrt_ui_pagescan_enable_needed(trigger)` (`:617`) の結果を bit1 として
+`orr r5,r5,#2` (`0x0c0511ae`) で合成し、`j_scan=...` を出したうえで
+`b.w app_tws_ibrt_set_access_mode` (`0x0c05122c` → `0x0c059acc`) に**末尾ジャンプ**する。
+すなわち **UI イベントのたびに access mode は再計算されて上書きされる。**
+
+#### 13.4.2 使う API
+
+`app_bt_accessmode_set()` は **IBRT ビルドでは何もしない** ——
+`services/bt_app/app_bt.cpp:271` の実体は `:275-277` が
+`#if defined(IBRT) return; #endif` で即 return する。`app_set_accessmode()`
+(`services/bt_app/app_bt_func.cpp:71`) も本体が `#if !defined(IBRT)` (`:72`) の中である。
+
+使うのは **`bt_status_t app_tws_ibrt_set_access_mode(btif_accessible_mode_t)`**
+(`services/ibrt_core/inc/app_tws_ibrt.h:310`)。SDK 内の前例は
+`services/app_ibrt/src/app_ibrt_search_pair_ui.cpp:243`
+(`app_tws_ibrt_set_access_mode(BTIF_BAM_CONNECTABLE_ONLY);` — コメント
+「after change the bd_addr, we should reset access mode again」) である。
+現在値は `ibrt_ctrl_t.access_mode` (`app_tws_ibrt.h:230`)、
+送信中フラグは `access_mode_sending` (`:231`) で読める
+(`ibrt_ctrl_t.access_mode` を直接読む前例は
+`services/app_ibrt/src/app_ibrt_customif_ui.cpp:583`、`apps/main/apps.cpp:1411`、
+および Run 4 ログの `checker: nv_role:0 current_role:0 access_mode:3` を出している
+`services/app_ibrt/src/app_ibrt_if.cpp:592-594`)。
+
+#### 13.4.3 決定 — 有効化は「`[mpi] peer ok` の直後」
+
+```c
+static int s_scan_forced;   /* glue がここを 1 にする */
+
+void spp_log_enable_connectable(void) { s_scan_forced = 1; }
+
+static void spp_log_rearm_access_mode(void)   /* ログスレッドから 200 ms 周期 */
+{
+    ibrt_ctrl_t *c;
+    if (!s_scan_forced) return;
+    c = app_tws_ibrt_get_bt_ctrl_ctx();               /* app_tws_ibrt.h:295 */
+    if (c->access_mode_sending) return;               /* :231 */
+    if (c->access_mode != BTIF_BAM_CONNECTABLE_ONLY)  /* :230 */
+        app_tws_ibrt_set_access_mode(BTIF_BAM_CONNECTABLE_ONLY);
+}
+```
+
+`mpi_ibrt_glue.cpp` からの呼び出しは **§11.2.5 のステップ 4 (`[mpi] peer ok` を出した直後)、
+M-T1 の前**とする。比較したのは次の 3 案:
+
+| 案 | 有効化点 | 却下/採用の理由 |
+|---|---|---|
+| A | `spp_log_service_init()` と同時 (BT スタック起動直後) | **却下**。§11.2.3 の in-case TWS 確立は `OPEN_BOX → mode=0x2 → CONNECT_TWS` という access mode 遷移そのものを使う。ここに割り込むと Run 4 で通った経路を変えてしまう |
+| B | GEMM 開始直前 | **却下**。PC 側の RFCOMM 接続確立には秒オーダーかかるので、計算中に接続済みである保証が得られない |
+| **C** | **`[mpi] peer ok` 直後 (採用)** | TWS 確立が完了した後なので §11.2 の経路を 1 バイトも変えない。M-T1 の RTT 掃引 (数百 ms〜秒) と GEMM の間に接続が間に合う可能性が高く、間に合わなくてもログはリングに残って接続後に流れる |
+
+**discoverable は不要。** 既存ボンド前提なら `BTIF_BAM_CONNECTABLE_ONLY` (page scan のみ) で
+再接続できるはずである。新規ペアリングが必要になった場合に限り、
+一時的に `BTIF_BAM_GENERAL_ACCESSIBLE` (0x03) にする手動手順を用意する (13.7-手順 0)。
+ただし「既存ボンドのデバイスに Windows が発信 COM ポートを作れるか」は 13.2.1 のとおり
+未確証なので **実機確認項目 (13.11-2)**。
+
+再アームが要る理由は 13.4.1 のとおり `judge_scan_type` が UI イベントのたびに
+上書きするため。SDK 側には重複設定を弾くフィルタがある
+(`ibrt_ui_log:filter access mode=%d, current access mode=%d`、Run 4 ログ 827 行目) ので、
+200 ms ごとに条件付きで呼んでも HCI コマンドは実際には飛ばない。
+
+---
+
+### 13.5 IBRT との干渉
+
+#### 13.5.1 モバイル ACL が張られたときに SDK が何をするか
+
+オープンソース側の入口は
+`services/app_ibrt/src/app_ibrt_customif_ui.cpp:117`
+`app_ibrt_customif_ui_global_handler_ind(link_type, evt_type, status)`。
+着信 ACL の分岐は `:139-146`:
+
+```c
+case BTIF_BTEVENT_LINK_CONNECT_IND:
+  if (MOBILE_LINK == link_type) {
+    if (BTIF_BEC_NO_ERROR == status) {
+      app_status_indication_set(APP_STATUS_INDICATION_CONNECTED);
+      app_tws_if_mobile_connected_handler(p_ibrt_ctrl->mobile_addr.address);
+    }
+  }
+```
+
+`app_tws_if_mobile_connected_handler()` (`services/app_tws/src/app_tws_if.cpp:397-408`) は
+`IBRT_MASTER` のとき `app_tws_if_sync_info(TWS_SYNC_USER_GFPS_INFO)` を呼ぶだけで、
+**ロールスワップもリンク共有起動も行わない**。登録側の
+`app_ibrt_customif_mobile_connected_ind()` (`:401-407`) も
+`app_ibrt_if_config_keeper_mobile_update(addr)` だけである。
+
+一方、**実際の役割スイッチとリンク共有起動は閉じた `app_ibrt_ui.o` の中で走る。**
+状態遷移の語彙は `services/ibrt_ui/inc/app_ibrt_ui.h` に公開されており:
+
+```
+IBRT_UI_W4_MOBILE_CONNECTION      (:212)
+IBRT_UI_W4_MOBILE_MSS_COMPLETE    (:213)   ← 携帯との master/slave switch
+IBRT_UI_W4_SET_ENV_COMPLETE       (:214)
+IBRT_UI_W4_MOBILE_ENTER_ACTIVE_MODE (:215)
+IBRT_UI_W4_START_IBRT_COMPLETE    (:216)   ← IBRT リンク共有の起動
+IBRT_UI_W4_IBRT_DATA_EXCHANGE_COMPLETE (:217)
+```
+
+対応するアクションは `:245-251` (`IBRT_ACTION_MOBILE_CONNECT` …
+`IBRT_ACTION_START_IBRT`, `IBRT_ACTION_TWS_SWITCH`)。
+関連関数は `app_ibrt_ui_judge_ibrt_role()` (`:584`)、
+`app_ibrt_ui_ibrt_start_needed()` (`:572`)、
+`app_tws_ibrt_do_mss_with_mobile()` (`app_tws_ibrt.h:311`) で、
+いずれもオープンソース側に呼び出し元は無い。
+
+⇒ **モバイル ACL が右バッズ (rank=0 / nv_role=MASTER) に張られると、
+IBRT の SM は MSS → IBRT 開始のシーケンスを回そうとする。**
+その過程で TWS ロールスワップが起きうる。これが MPI にとっての最大の干渉源である。
+
+#### 13.5.2 実験パッチ済み状態 (§11.2.4 + §12.8) での予想挙動
+
+現行ファームは「箱イベントを注入する経路が glue の強制 OUT_BOX だけ」になっており
+(§12.8.3)、`app_ibrt_ui` の SM そのものは生きている。よって:
+
+1. SPP 接続は **RFCOMM (L2CAP) チャネル 1 本**であり、A2DP/HFP の profile 接続ではない。
+   `IBRT_UI_W4_MOBILE_CONNECTION` 以降が回っても、共有すべき profile が無いので
+   `IBRT_ACTION_START_IBRT` が実質的に何もしない可能性が高い
+2. しかし **MSS (`IBRT_UI_W4_MOBILE_MSS_COMPLETE`) は ACL 単体でも起こりうる**。
+   MSS 自体は TWS リンクを切らないが、`current_role` が変わると
+   §11.2.2 で「rank は左右ストラップから確定する」ようにした判断は影響を受けない
+   (`app_tws_is_right_side()` は物理ストラップ) ため、**rank は壊れない**
+3. ロールスワップ中は `tws_ctrl_send_cmd(0x8201)` が失敗しうる。
+   MPI 実行中に SPP 接続が確立すると `[mpi] frames err` が増える可能性がある
+   ⇒ **13.9 の合否条件で「MPI 2 ランク PASS が SPP 併用でも維持される」を必ず見る**
+4. SPP 接続は MPI 完了後に確立する運用 (13.4.3 案 C) なら 3 のリスクはほぼ消える。
+   v1 はこれを既定とする
+
+#### 13.5.3 観測ポイント (UART で見る行)
+
+| 行 | 意味 | 出所 |
+|---|---|---|
+| `[spplog] connected` / `disconnected` | 自前のコールバック | 13.3.4 |
+| `ibrt_ui_log:set_access_mode=2` + `write_scan_enable=2` | 再アームが効いた | 13.4 |
+| `ibrt_ui_log:filter access mode=2, current access mode=2` | 既に 2 なので HCI は飛ばない (正常) | `app_ibrt_ui_global_handler` |
+| `BTIF_BTEVENT_LINK_CONNECT_IND` / `twsif_mobile_connected` | モバイル ACL が張られた | `app_ibrt_customif_ui.cpp:139`, `app_tws_if.cpp:398` |
+| `ibrt_ui_log:judge role,local_role=…,peer_role=…` | SM がロール判定に入った | `app_ibrt_ui.o` |
+| `ibrt_ui_log:tws switch callback,local_role=…` | ロールスワップが起きた ← **要注視** | `app_ibrt_ui.o` |
+| `tws cmd send failed, tws link missing` | MPI が線に出せていない ← **合否条件 4** | §2.3 |
+
+---
+
+### 13.6 ワイヤフォーマット
+
+**v1 は素のテキスト行。フレーミングもチェックサムも付けない。**
+理由は (a) 受信側が COM ポートを `readline` するだけで済む、
+(b) RFCOMM は L2CAP/ACL の ARQ 上にあるので順序保証・無損失であり
+(§2.6 と同じ理屈)、線上の破損を検出する層は要らない、
+(c) 欠落は**バッファ溢れでしか起きない**ので、それだけ検出できればよい。
+
+```
+#<seq> <UART と同一の本文>\n
+```
+
+- `seq` は `compute_log_tap` が push 時に採番する単調増加の 10 進数 (13.3.3)。
+  **UART 側には出さない** (既存出力を 1 バイトも変えない)
+- 欠落検出は **seq の飛び**で行う。番号は push 時に採るので、
+  リング溢れで捨てられた行の番号は線に出ない ⇒ `#12` の次が `#47` なら 34 行欠落
+- 補助として、drop が発生した後の最初のチャンクで
+  `#- [log] dropped=<行数> contended=<行数>\n` を単独で送る (13.3.4)。
+  `contended` は try-lock に失敗して捨てた行数 (13.3.3)
+- 改行は `\n` のみ。UART 側の `\r\n` (`hal_trace.c:1119-1123`) とは異なる
+- 文字コードは ASCII のみ
+
+---
+
+### 13.7 Windows 受信側
+
+#### 13.7.1 人間が 1 回だけやる操作列
+
+0. (新規ペアリングが必要な場合のみ) バッズを一度ケースから出してペアリングモードにするか、
+   13.4.3 のとおり一時的に `BTIF_BAM_GENERAL_ACCESSIBLE` にしたファームを焼く
+1. 設定 → Bluetooth とデバイス → デバイス → **その他の Bluetooth 設定**
+2. **COM ポート**タブ → 追加 → **発信 (Outgoing)** → デバイスに PineBuds Pro を選択 →
+   サービスに `PineBudsLog` (13.2.2 の ServiceName) を選択
+3. 割り当てられた `COMn` を控える
+4. 拾えない場合: デバイスを一度「デバイスの削除」してから再ペアリングし、2 をやり直す
+   (13.2.1 のとおり、既存ボンドに後から足したサービスを Windows が拾うかは未確証)
+
+#### 13.7.2 受信スクリプト
+
+Windows 側 (WSL には Bluetooth が無い) で `pyserial` を使う。置き場所は
+`C:\Users\Ryuto\pinebuds-logs\` とし、WSL からは `/mnt/c/Users/Ryuto/pinebuds-logs/` で読む。
+
+```python
+# C:\Users\Ryuto\pinebuds-logs\spp_tail.py   (Windows の python で実行)
+import serial, sys, time, pathlib
+
+port = sys.argv[1] if len(sys.argv) > 1 else "COM7"
+out  = pathlib.Path(r"C:\Users\Ryuto\pinebuds-logs") / time.strftime("run-%Y%m%d-%H%M%S.log")
+
+# 発信 COM ポートは open した瞬間に RFCOMM 接続を張る。
+# timeout を必ず指定する (未指定だと readline が永久にブロックしうる)。
+with serial.Serial(port, 115200, timeout=1) as s, out.open("w", buffering=1) as f:
+    prev = None
+    for raw in iter(s.readline, b""):
+        line = raw.decode("ascii", "replace").rstrip("\r\n")
+        if not line:
+            continue
+        if line.startswith("#") and not line.startswith("#-"):
+            n = int(line[1:].split(" ", 1)[0])
+            if prev is not None and n != prev + 1:
+                f.write(f"!! GAP {prev} -> {n}\n")
+            prev = n
+        f.write(line + "\n")
+        print(line)
+```
+
+ボーレートは仮想 COM では意味を持たない (RFCOMM は自前でフロー制御する) が、
+`pyserial` は引数を要求するので任意の値を渡す。
+
+WSL 側からは `tail -f /mnt/c/Users/Ryuto/pinebuds-logs/run-*.log` で追う。
+TCP ブリッジは、行レートが数十行/実行しかないので **v1 では不要**と判断する。
+
+---
+
+### 13.8 install スクリプトのフック追加 (手順 9)
+
+`scripts/install-into-sdk.sh` に §12.4/§12.8 と同じマーカー機構でもう 1 つ追加する。
+マーカーは `pine-buds-cluster SPP log`。対象は
+`services/bt_app/besmain.cpp` の 1 箇所だけ。
+
+```
+# 対象: besmain.cpp:451 — SPP ログサービスを BesbtThread のイベントループ突入前に登録する
+-  osapi_notify_evm();
++  /* pine-buds-cluster SPP log */
++  spp_log_service_init();
++  osapi_notify_evm();
+```
+
+加えて、ファイル先頭 (`besmain()` の定義より前) に
+`extern "C" void spp_log_service_init(void); /* pine-buds-cluster SPP log */` を挿入する。
+
+- `osapi_notify_evm();` は同ファイル内で **1 回しか出現しない**ことを確認済み
+  (grep で 1 件)。既存フックと同じく `str.replace` の前に出現数を assert する
+- ここが正しい登録点である根拠: SDK 自身が同じ位置 (`besmain.cpp:448-449`) で
+  `#ifdef TEST_OVER_THE_AIR_ENANBLED` → `app_tota_init()` を呼んでおり、
+  `app_tota_init()` は `services/tota/app_tota.cpp:74` で `app_spp_tota_init()` を呼ぶ。
+  つまり **SPP サービス登録は `BesbtThread` 上で、イベントループに入る直前に行う**のが
+  SDK の作法である
+- コピー対象に `firmware/pinebuds_compute/{log_ring.h,log_ring.cpp,spp_log_service.cpp}` を
+  追加する (手順 4 と同じ `apps/main/` へのフラットコピー)。
+  `Makefile:889` の `--whole-archive` により、`services/bt_app/built-in.a` から
+  `apps/built-in.a` 内のシンボルを参照しても解決される
+
+---
+
+### 13.9 合否条件 (§11.3 形式)
+
+右バッズ UART に §11.3 の既存 4 条件 + §12.6 の 2 条件が出たうえで、
+
+```
+[spplog] connected
+ibrt_ui_log:set_access_mode=2
+write_scan_enable=2
+```
+
+が出ること。Windows 側 `run-*.log` に
+
+```
+#1 [ctor] GlobalProbe constructed
+...
+#<n> GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 expect=32768.000000 PASS
+#<n+1> GEMM-MPI elapsed=<m> ms frames tx=2 rx=4 err=0
+#<n+2> [mpi] finalize done rank=0
+```
+
+が出ること。合格条件は 7 つ:
+
+1. **SPP 接続確立** — UART に `[spplog] connected` が出て、Windows 側で COM ポートが
+   open できる
+2. **内容一致** — Windows 側の行 (先頭 `#<seq> ` を除去したもの) が、UART 側の
+   `COMPUTE_TRACE` 由来の行と**完全に同一の集合**である。
+   SDK 自身の TRACE 行 (`ibrt_ui_log:` など) は 1 行も混ざらない
+3. **checksum 一致** — `checksum=32768.000000` が SPP 側でも厳密一致
+4. **drop 0** — Windows 側の `!! GAP` が 0 回、`#- [log] dropped=` が 0 回
+5. **MPI 回帰** — MPI cmdcode `0x8201` の `tws cmd send failed` が左右とも 0 回、
+   両側 `size=2`、`[mpi] finalize done` が両側に出る (§11.3 と同一条件を維持)
+6. **タイミング非退行** — `GEMM-MPI elapsed` が Run 4 の 13 ms に対して
+   **20 ms 以内**に収まる (SPP 送信が計算を乱していない)
+7. **到達遅延** — バッズが行を出してから Windows 側ファイルに現れるまでの目安が
+   **1 秒以内**。ログスレッドの周期 200 ms + RFCOMM の sniff 復帰を見込んだ値。
+   厳密な計測はしない (13.11-6)
+
+条件 2 の照合は、UART ログを `tr -d '\0' | tr '\r' '\n'` で正規化したうえで
+`COMPUTE_TRACE` 由来の行だけを抜き、SPP ログ側の `#<seq> ` を剥がして `diff` する。
+
+---
+
+### 13.10 リスク
+
+1. **帯域とタイミング摂動。** ログスレッドは `osPriorityLow` なので `compute` スレッド
+   (osPriorityBelowNormal) を止めないが、`btif_spp_write` の内部は `BesbtThread` の
+   仕事を増やす。§2.5 のとおり MPI の送受信ポンプも `BesbtThread` にあるため、
+   **SPP のトラフィックは MPI のスループットを直接削る**。
+   v1 で SPP 接続を MPI 完了後に確立する運用 (13.4.3 案 C) にしたのはこのため。
+   合否条件 6 で退行を検出する
+2. **ボンド / リンクキー。** ペアリング済みと言っても、どのファーム時点のボンドかが不明。
+   §12.4 のパッチでバッズの BD アドレスは変えていないので既存ボンドは生きているはずだが、
+   `app_ibrt_config_the_same_bd_addr()` (`app_ibrt_search_pair_ui.cpp:223-243`) が
+   走る条件に入ると BD アドレスが書き換わる。その場合は Windows 側で削除→再ペアリングが必要
+3. **charging-boot との相互作用。** §12.4 で `CHARGER_PLUGINOUT_RESET=0` にし、
+   §12.8 で充電器由来の箱イベントを殺してある。SPP 接続はこれらの経路を使わないので
+   新たな相互作用は想定していないが、**モバイル ACL が張られると
+   `apps.cpp:1508` 周辺の「モバイル未接続なら自動電源断」の条件が変わる**。
+   §11.2.4 対象 2 で自動電源断自体を殺してあるので実害は無い
+4. **将来の A2DP 同時動作。** 現在は SPP 単独の ACL しか張らない前提だが、
+   実際に音楽を再生しながら計算する段階では A2DP + SPP + TWS + MPI が同居する。
+   そのとき `app_ibrt_ui_judge_scan_type` の `IBRT_A2DP_PLAYING_TRIGGER`
+   (`app_ibrt_ui.h:178`) で page scan パラメータが変わり、
+   13.4.3 の再アームと競合する可能性がある。**v1 では A2DP を使わない**ことを手順書に明記する
+5. **`vsnprintf` の 2 度呼び。** UART の TRACE と tap で同じ書式を 2 回整形する。
+   1 行あたりの CPU コストが倍になるが、`hal_trace.c:1113-1118` と同じ処理を
+   もう 1 回するだけであり、GEMM 1 回あたりのログは十数行しかない。
+   `%f` を使わない制約 (13.3.1) を破るとここが一気に重くなる
+6. **`spp_device` を直接触る。** `s_dev->portType` / `app_id` /
+   `spp_handle_data_event_func` / `creditMutex` への代入は
+   `spp_api.h:87-109` の公開構造体に対する操作であり、TOTA (`app_spp_tota.cpp:345-347`) と
+   `app_rfcomm_mgr.cpp:190-214` が同じことをしている。ただし
+   `services/bt_if_enhanced/lib/*.a` はソース非公開なので、
+   ライブラリ差し替えで破綻する点は §11.4 リスク 1 と同じ性質を持つ
+
+---
+
+### 13.11 実機確認項目 (ホストテスト対象外)
+
+いずれもホストでは検証できない。`docs/manual.md` の手動確認手順に落とす。
+
+1. 既にペアリング済みのデバイスに後から SPP サービスを足したとき、Windows の
+   COM ポートタブが再探索するか。しないなら「デバイスの削除 → 再ペアリング」が要るか
+2. `BTIF_BAM_CONNECTABLE_ONLY` (discoverable なし) の状態で、
+   Windows から発信 COM ポートを開いて接続できるか。できなければ
+   一時的に `BTIF_BAM_GENERAL_ACCESSIBLE` にする必要がある
+3. SDP レコードが Windows 側で `PineBudsLog` という名前で見えるか
+   (ServiceName 属性が正しく読まれているか)
+4. RFCOMM チャネル 19 (`RFCOMM_CHANNEL_10`) が実際に払い出されるか
+   (`btif_spp_get_server_channel()` の戻り値を UART に出して確認する)
+5. `BTIF_SPP_EVENT_DATA_SENT` の `tx_data_length` が、渡した長さと常に一致するか
+   (部分送信が起きるか)。起きるなら `log_ring_commit` の部分確定パスが実際に走る
+6. バッズが行を出してから Windows 側に現れるまでの実測遅延 (合否条件 7 の裏取り)
+7. SPP 接続中に TWS ロールスワップ (`ibrt_ui_log:tws switch callback`) が起きるか
+8. SPP 接続確立が MPI 実行中に起きた場合、`[mpi] frames err` が増えるか
+9. `GEMM-MPI elapsed` が SPP 併用で何 ms になるか (合否条件 6)
+10. 左バッズ (rank=1) も同時に SPP 接続した場合の挙動 (v1 の範囲外だが、
+    Windows が 2 台とも COM ポートを持てるかだけ見ておく)
+
+---
+
+### 13.12 テストリスト (TDD / t-wada スタイル / Red から始める)
+
+対象は `log_ring` の純ロジックと、そこから切り出した送信ステートマシンの
+チャンク計算だけである。SPP API・SDP・COM ポート・遅延・access mode は
+**ホストテストの対象外**とし、13.11 と 13.9 に置く。
+
+新規テストファイルは **`tests/test_log_ring.cpp`**。既存 5 スイートと同じ形で
+`tests/test_framework.h` を使う。
+
+#### リングバッファ (`log_ring`)
+
+- [ ] **R1 初期状態**: `log_ring_init` 後、`log_ring_used()==0`、
+      `log_ring_peek()` が 0 を返す、`log_ring_take_dropped()==0`
+- [ ] **R2 1 行の往復**: `push("abc",3)` → `peek` が `"abc\n"` の 4 バイトを返し、
+      `base` が 0 であること
+- [ ] **R3 消費は commit まで起きない**: R2 の直後にもう一度 `peek` すると
+      **同じ 4 バイトが同じ base で返る** (peek は非破壊)
+- [ ] **R4 commit で進む**: `commit(base,4)` 後に `peek` が 0 を返し、`used()==0`
+- [ ] **R5 部分 commit**: 8 バイト分 push → `peek` で 8 バイト取得 → `commit(base,3)` →
+      次の `peek` が残り 5 バイトを `base+3` から返す
+- [ ] **R6 二重 commit は no-op**: `commit(base,4)` を 2 回呼んでも `used()` が負に回らない
+- [ ] **R7 古い commit は無視される**: `commit(base,4)` の後に `commit(base,2)` を呼んでも
+      `free_pos` が戻らない
+- [ ] **R8 peek の上限**: 100 バイト積んだ状態で `peek(dst,16,&base)` が 16 を返す
+- [ ] **R9 折返し**: `LOG_RING_CAPACITY` の境界をまたぐように push/commit を繰り返し、
+      取り出した全バイト列が push した全バイト列と一致すること
+- [ ] **R10 満杯時に drop-oldest**: 容量いっぱいまで行を積み、さらに 1 行 push すると
+      **最古の 1 行が丸ごと消え**、`take_dropped()==1` になること
+- [ ] **R11 drop は行単位**: R10 の後、`peek` で取れる先頭が
+      「2 番目に古い行の先頭」であること (行の途中から始まらない)
+- [ ] **R12 複数行 drop**: 1 行で複数行分の空きが要る場合、必要な数だけ drop され
+      `take_dropped()` がその行数を返すこと
+- [ ] **R13 take_dropped はクリアする**: 2 回目の `take_dropped()` が 0 を返す
+- [ ] **R14 容量超の行は拒否**: `LOG_RING_CAPACITY` 以上の長さの行を push すると
+      0 を返し、**既存の内容を 1 バイトも壊さず**、`take_dropped()` が 1 増える
+- [ ] **R15 in-flight 中の drop と commit の整合**: `peek(base)` した直後に
+      リングを溢れさせて `free_pos` が `base+n` を追い越す状況を作り、
+      その後 `commit(base,n)` を呼んでも `free_pos` が**戻らない**こと (R7 の一般形)
+- [ ] **R16 空 push**: `push(line,0)` は `"\n"` 1 バイトを積む (空行として扱う)
+
+#### 送信ステートマシンのチャンク計算
+
+送信ロジックのうち、SDK に触らない部分を
+`log_ring_next_chunk(ring, dropped, contended, dst, max, &base, &consumes_ring)`
+という純関数に切り出し、`spp_log_thread_body` はこれを呼ぶだけにする。
+
+- [ ] **S1 通常チャンク**: drop なし・リングにデータありのとき、
+      リング内容がそのまま `dst` に入り `consumes_ring==1`、`base` が正しい
+- [ ] **S2 drop マーカは単独チャンク**: `dropped>0` のとき、`dst` は
+      `"#- [log] dropped=<n> contended=<m>\n"` **だけ**になり、
+      `consumes_ring==0`、`base` は使われない
+- [ ] **S3 マーカの次は通常チャンク**: S2 の直後にもう一度呼ぶと S1 に戻る
+      (`dropped` が消費済み)
+- [ ] **S4 空リング**: drop なし・リング空のとき 0 を返す
+- [ ] **S5 チャンク上限**: `max` を超えるデータがあっても戻り値が `max` 以下
+
+計 21 件。実機でしか確認できない項目 (SDP / COM ポート / 遅延 / access mode /
+IBRT 干渉) は 13.11 に 10 件、合否条件は 13.9 に 7 件として分離した。
+
+#### Makefile への組み込み
+
+既存 5 スイートの並びにそのまま足す。
+
+```make
+RINGBIN  := $(BUILDDIR)/test_log_ring
+RINGSRC  := firmware/pinebuds_compute/log_ring.cpp
+
+test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) check98
+	...
+	./$(RINGBIN)
+
+$(RINGBIN): tests/test_log_ring.cpp $(RINGSRC) firmware/pinebuds_compute/log_ring.h \
+            tests/test_framework.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -Ifirmware/pinebuds_compute -Itests \
+		tests/test_log_ring.cpp $(RINGSRC) -o $@
+```
+
+`check98` のコンパイル対象にも `firmware/pinebuds_compute/log_ring.cpp` を足す。
+`TARGET_DIALECT` は既に `-Ifirmware/pinebuds_compute` を持っているので追加の
+include パスは要らない。`spp_log_service.cpp` は SDK ヘッダを使うため
+**ホストではビルドしない** (`mpi_ibrt_glue.cpp` と同じ扱い)。
