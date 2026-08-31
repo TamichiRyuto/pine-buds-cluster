@@ -34,6 +34,7 @@
 // against docs/design-ibrt-transport.md §13.1-§13.4 during implementation.
 #include "spp_api.h"       // struct spp_device/spp_service, btif_spp_*, RFCOMM_CHANNEL_10, BTIF_SPP_*
 #include "bt_if.h"         // BTIF_APP_SPP_SERVER_ID_10
+#include "app_spp.h"       // SPP_RECV_BUFFER_SIZE (= L2CAP_MTU*4, app_spp.h:29-32)
 #include "app_tws_ibrt.h"  // ibrt_ctrl_t, app_tws_ibrt_get_bt_ctrl_ctx, app_tws_ibrt_set_access_mode
 #include "me_api.h"        // BTIF_BAM_CONNECTABLE_ONLY, BTIF_COD_MAJOR_PERIPHERAL
 #include "cmsis_os.h"
@@ -83,7 +84,10 @@ sdp_attribute_t g_log_spp_sdp_attributes[] = {
 struct spp_device *s_dev;
 struct spp_service *s_service;
 btif_sdp_record_t *s_record;
-uint8_t s_rx_buf[256]; /* unused for RX; btif_spp_init_rx_buf still requires one */
+uint8_t s_rx_buf[SPP_RECV_BUFFER_SIZE]; /* RX is unused, but the stack
+    asserts "rx buffer is too small" in _btif_spp_create_channel for
+    anything below L2CAP_MTU*4 = 2688 (device run 5; same size TOTA uses,
+    app_spp_tota.cpp:59) */
 
 osMutexDef(spp_log_mutex);
 osMutexDef(spp_log_credit_mutex);
