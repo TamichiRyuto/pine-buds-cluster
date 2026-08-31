@@ -1221,3 +1221,108 @@ ibrt_ui_log:...                          ← app_ibrt_init() 以降が動いて�
 6. **`CHARGER_PLUGINOUT_RESET` は open_source ターゲット全体に効く。** 本リポジトリは
    このターゲットしかビルドしないので実害は無いが、SDK を他用途と共有する場合は
    install スクリプトの適用範囲に注意する
+
+---
+
+### 12.8 Run 3 — 充電器 PLUGIN が CLOSE_BOX を注入して走行中のリンクを切る
+
+#### 12.8.1 Run 3 の結果
+
+§12.4 パッチ (実機、2026-09-01) は成功した。両バッズの UART で
+`Yin BATTERY 2` → `CHARGING PWRON!` → `bt_stack_init_done` → `ibrt_ui_log:...` が出て、
+§11.2.1 の `init_done=1` に到達し、`[mpi] init rank=0 size=2 link_wait=1900 ms` →
+`peer ok rank=0 peer=1` まで進んだ。§11.5 で対策した `mpi_compute_thread` の自己終了
+MemFault も再発しておらず、**充電起動から BT・TWS・MPI ハンドシェイクまでが定常状態で
+初めて確認できた**。
+
+しかし GEMM フレーム交換の途中 (~130 フレーム通過後) で TWS リンクが切断され、
+以降のフレームがすべて失敗するようになった。§12.7 リスク 4 で予告した「充電起動なのに
+ケース外」という想定外状態が、今回は §11.2.4 対象 3 (未パッチのまま残していた充電器
+プラグインの箱イベント注入) という形で現実化した。
+
+#### 12.8.2 機構
+
+UART のエビデンスチェーンは次の順で並ぶ。
+
+```
+charger:1                                    ← app_ibrt_search_pair_ui.cpp:495
+APP_BATTERY_CHARGER_PLUGIN nv_role 00        ← :498-499
+box event:4                                  ← :76 (app_box_handle_timehandler)
+custom event entry enter=CLOSE_BOX_EVENT     ← app_ibrt_if_event_entry 経由
+entry=app_ibrt_ui_free_link_handler, action=TWS_DISCONNECT
+tws cmd send failed, tws link missing        ← 以降の全送信 (SDK cmdcode 8025 含む)
+```
+
+コード側の根拠は `services/app_ibrt/src/app_ibrt_search_pair_ui.cpp` の
+`app_ibrt_battery_handle_process_normal()` (`:487-533`)。バッテリーのデバウンスが完了して
+`APP_BATTERY_STATUS_CHARGING` 状態で `APP_BATTERY_CHARGER_PLUGIN` を受け取ると
+(`:493-496`)、
+
+```c
+504       if (p_ui_ctrl->config.check_plugin_excute_closedbox_event == true)
+505         box_event = IBRT_CLOSE_BOX_EVENT;
+506       else
+507         box_event = IBRT_PUT_IN_EVENT;
+509       if (app_box_handle_timer != NULL) {
+510         osTimerStop(app_box_handle_timer);
+511         osTimerStart(app_box_handle_timer, 500);
+512       }
+```
+
+`check_plugin_excute_closedbox_event` は `services/app_ibrt/src/app_ibrt_customif_ui.cpp:684`
+で `true` に固定されているビルド設定なので、`box_event` は無条件に
+`IBRT_CLOSE_BOX_EVENT` (`= 4`、`services/ibrt_ui/inc/app_ibrt_ui.h:67`) になる。
+500 ms 後、`app_box_handle_timer` のハンドラ `app_box_handle_timehandler()`
+(`app_ibrt_search_pair_ui.cpp:73-81`) が `TRACE(1, "box event:%d", boxStatus)` を出しつつ
+`app_ibrt_if_event_entry(CLOSE_BOX_EVENT)` (`:78`) を呼び、そこから
+`app_ibrt_ui_free_link_handler` (`action=TWS_DISCONNECT`) に至って TWS リンクを
+**意図的に切断する** (reason 0x16)。以降はどの `tws_ctrl_send_cmd` 呼び出しも
+§2.3 のリンク切断ゲートに引っかかり `tws cmd send failed, tws link missing` を返す。
+
+`BOX_DET_USE_GPIO` は本ビルドで未定義 (grep 済み) なので、GPIO 由来の箱検出は無い。
+**この充電器 PLUGIN マッピングが、glue 自身の §11.2.3 注入を除けば、実行時に箱イベントを
+発生させる唯一の経路である。** §11.2.4 対象 3 として「まず実測してから足す」と保留していたのが
+今回の Run 3 で実測されたことになる。PLUGOUT 側も同型 (`:514-527`、`IBRT_FETCH_OUT_EVENT`) で、
+box_state を書き換える点は同じなので併せて対処する。
+
+#### 12.8.3 対策 (決定済み)
+
+§11.2.4 の `apps.cpp` パッチと同じ「一意なアンカーを 1 行 `if (0 && ...)` で無効化する」方針を
+`app_ibrt_search_pair_ui.cpp` にも適用する。対象は
+`app_ibrt_battery_handle_process_normal()` 内の 2 箇所、PLUGIN 分岐 (`:509-512`) と
+PLUGOUT 分岐 (`:523-526`) にある同一のタイマ起動ブロック:
+
+```c
+      if (app_box_handle_timer != NULL) {
+        osTimerStop(app_box_handle_timer);
+        osTimerStart(app_box_handle_timer, 500);
+      }
+```
+
+を
+
+```c
+      if (0 && app_box_handle_timer != NULL) { /* pine-buds-cluster charger box events */
+        osTimerStop(app_box_handle_timer);
+        osTimerStart(app_box_handle_timer, 500);
+      }
+```
+
+に置き換える。`box_event` 自体への代入とログ (`TWSCON_DBLOG`) はそのまま残すので、
+充電器のプラグ/アンプラグは引き続き UART に記録されるが、`app_box_handle_timer` が
+一度も起動されなくなるため `app_box_handle_timehandler()` → `app_ibrt_if_event_entry()` へは
+到達しない。`scripts/install-into-sdk.sh` の手順 8 がこの置換を担う。マーカー文字列
+`pine-buds-cluster charger box events` で冪等性を確保し、既存フック
+(手順 6 の `apps.cpp` パッチ) と同じ「一意アンカーの `str.replace` 前に出現数を assert する」
+形にした。
+
+このパッチにより、箱状態を書き換える経路は **glue の §11.2.3 注入だけ**になる。
+`BOX_DET_USE_GPIO` が未定義であることは既に確認済みなので、他に競合する箱イベント源は無い。
+
+#### 12.8.4 リスク
+
+- PLUGOUT 側 (`app_ibrt_search_pair_ui.cpp:523-526`) も同時に無効化するため、
+  ケースから取り出したときの `IBRT_FETCH_OUT_EVENT` 注入も死ぬ。ただし本実験手順では
+  バッズをケースから取り出して使うことは無い (常にケース内で充電起動する) ので影響は無い。
+  工場ファームに戻せば元の挙動に戻る。§12.7 リスク 5 (常用しないこと) と同じ位置づけの
+  制約であり、新たなリスク区分を増やすものではない。
