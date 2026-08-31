@@ -667,6 +667,14 @@ void mpi_compute_thread(void const *argument) {
 
     MPI_Finalize();
     COMPUTE_TRACE(1, "[mpi] finalize done rank=%d", self_rank);
+
+    // Never return: with __RTX_CPU_STATISTICS__=1 this SDK's RTX faults on
+    // thread self-termination (rt_tsk_delete NULLs os_tsk.run, then
+    // rt_switch_req dereferences it; design doc §11.5). Park like every
+    // other SDK thread does.
+    for (;;) {
+        osDelay(10000);
+    }
 }
 
 osThreadDef(mpi_compute_thread, osPriorityBelowNormal, 1, 4096, "mpi_compute");
