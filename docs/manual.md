@@ -85,6 +85,14 @@ docker compose run --rm builder ./download.sh
 長押しすると強制再起動する (この SDK の変更点として README に明記あり。なお「ケース内
 ボタン押下での DFU 誘発」は無効化済み)。
 
+**注意 (`CHARGER_PLUGINOUT_RESET=0` 適用後の書き込みトリガ):** 本リポジトリのファーム
+(`scripts/install-into-sdk.sh` の §12.4 パッチ適用後) はケースからの抜き差しでリセット
+しなくなるため、bestool がリブートを捕捉できないことがある。旧ファーム (=1) から新ファ
+ーム (=0) への **1 回目の書き込みは従来どおり抜き差しでよい**。**2 回目以降**は上記の
+「ケース内で背面ボタンを約 5 秒長押し」でリブートさせること。`__POWERKEY_CTRL_ONOFF_ONLY__`
+が未定義のため電源キー UP は `app_shutdown()` に入るが、充電中は PMU が即座に再投入する
+ため結果的にリブートになる (詳細は `docs/design-ibrt-transport.md` §12.7 リスク 3)。
+
 **ブリック復旧:** pine64 配布の「Windows based programmer utility」(v1.48、ベンダー製
 マニュアル PDF あり) + 工場出荷ファーム (`AC08_20221102.bin`、OTA ブート
 `ota_boot_rel_8054309a08.bin`) で復元できる。ケース内には SY8821 管理のリセットボタンも
