@@ -14,6 +14,11 @@
 #      `<omp.h>` angle-bracket includes resolve to the copies from step 4)
 #      and -DGEMM_BENCH_NO_MAIN (disables the bench's own main(), same hook
 #      tests/test_gemm_bench.cpp uses on host) to apps/main/Makefile
+#   6. Patches apps.cpp to hold TWS up while docked/charging: disables the
+#      5 s CLOSE_BOX re-injection and the 5 min auto-shutdown timer that
+#      would otherwise undo the compute thread's forced OUT_BOX bring-up
+#      (docs/design-ibrt-transport.md §11.2.3/§11.2.4). One-line `if (0 &&
+#      ...)` guards, not #ifdef, to keep the diff minimal and warning-free
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -22,6 +27,7 @@ DST="${SDK_DIR}/apps/main"
 APPS_CPP="${DST}/apps.cpp"
 MARKER="pine-buds-cluster compute hook"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
+TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 
 [ -d "${DST}" ] || { echo "error: run scripts/setup-openpinebuds.sh first"; exit 1; }
 
@@ -80,6 +86,36 @@ text = text.replace(call_anchor, call + call_anchor)
 open(path, "w").write(text)
 EOF
     echo "[ok] compute_main() hooked into app_init (before 32K sysfreq drop)"
+fi
+
+if grep -q "${TWS_HOLD_MARKER}" "${APPS_CPP}"; then
+    echo "[ok] in-case TWS hold patch already present"
+else
+    python3 - "${APPS_CPP}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §11.2.4: hold TWS up while docked/charging
+# so the compute thread's forced OUT_BOX bring-up (§11.2.3) survives the
+# SDK's own 5 s box-state poll and 5 min auto-shutdown timer. Target 3
+# (charger-plugin box event) is deliberately NOT patched -- §11.2.4 says to
+# add it only if "box event:4" shows up in re-test logs.
+target1_old = "  if (app_battery_is_charging()) {"
+target1_new = """  /* pine-buds-cluster in-case TWS hold */
+  if (0 && app_battery_is_charging()) {"""
+
+target2_old = "      if (auto_shutdown_cnt == Auto_Shutdowm_TIME / 5) {"
+target2_new = """      /* pine-buds-cluster in-case TWS hold */
+      if (0 && auto_shutdown_cnt == Auto_Shutdowm_TIME / 5) {"""
+
+text = open(path).read()
+assert text.count(target1_old) == 1, "apps.cpp:1502 anchor not unique; re-check"
+assert text.count(target2_old) == 1, "apps.cpp:1517 anchor not unique; re-check"
+text = text.replace(target1_old, target1_new)
+text = text.replace(target2_old, target2_new)
+open(path, "w").write(text)
+EOF
+    echo "[ok] in-case TWS hold patched (CLOSE_BOX re-injection + auto-shutdown disabled)"
 fi
 
 echo
