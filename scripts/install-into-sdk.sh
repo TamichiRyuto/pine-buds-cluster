@@ -32,6 +32,11 @@
 #      stays owned solely by the MPI glue's forced OUT_BOX (§11.2.3). Same
 #      one-line `if (0 && ...)` guard style as step 6
 #      (docs/design-ibrt-transport.md §12.8)
+#   9. Copies the SPP log ring + service (log_ring.{h,cpp}, spp_log_service.{h,cpp})
+#      flat into apps/main/ alongside the rest (same as step 4), and patches
+#      services/bt_app/besmain.cpp to call spp_log_service_init() on
+#      BesbtThread, just before the event loop -- the same spot the SDK's
+#      own app_tota_init() runs from (docs/design-ibrt-transport.md §13.8)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,11 +45,13 @@ DST="${SDK_DIR}/apps/main"
 APPS_CPP="${DST}/apps.cpp"
 TARGET_MK="${SDK_DIR}/config/open_source/target.mk"
 SEARCH_PAIR_UI="${SDK_DIR}/services/app_ibrt/src/app_ibrt_search_pair_ui.cpp"
+BESMAIN_CPP="${SDK_DIR}/services/bt_app/besmain.cpp"
 MARKER="pine-buds-cluster compute hook"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
 BOX_EVENT_MARKER="pine-buds-cluster charger box events"
+SPP_LOG_MARKER="pine-buds-cluster SPP log"
 
 [ -d "${DST}" ] || { echo "error: run scripts/setup-openpinebuds.sh first"; exit 1; }
 
@@ -62,8 +69,12 @@ cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/bench/gemm_mpi_omp.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/log_ring.h \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/log_ring.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/spp_log_service.h \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/spp_log_service.cpp \
    "${DST}/"
-echo "[ok] MPI/OpenMP adapters + bench + IBRT glue copied into apps/main/"
+echo "[ok] MPI/OpenMP adapters + bench + IBRT glue + SPP log service copied into apps/main/"
 
 if ! grep -q "PINEBUDS_TARGET" "${DST}/Makefile"; then
     printf '\n# %s\nccflags-y += -DPINEBUDS_TARGET\n' "${MARKER}" >> "${DST}/Makefile"
@@ -189,6 +200,36 @@ text = text.replace(old, new)
 open(path, "w").write(text)
 EOF
     echo "[ok] charger box-event injection patched (PLUGIN + PLUGOUT timer posts disabled)"
+fi
+
+if grep -q "${SPP_LOG_MARKER}" "${BESMAIN_CPP}"; then
+    echo "[ok] SPP log service hook already present"
+else
+    python3 - "${BESMAIN_CPP}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §13.8: register the SPP log service on
+# BesbtThread, just before the event loop -- the same spot the SDK's own
+# app_tota_init() runs from (besmain.cpp:448-449). extern "C" is a linkage
+# specification: it must live at file scope, not inside a block, so declare
+# above besmain() and call inside it (same pattern as the compute_main hook
+# above).
+decl_anchor = "int besmain(void) {"
+decl = 'extern "C" void spp_log_service_init(void); /* pine-buds-cluster SPP log */\n\n'
+call_anchor = "  osapi_notify_evm();"
+call = """  /* pine-buds-cluster SPP log */
+  spp_log_service_init();
+"""
+
+text = open(path).read()
+assert text.count(decl_anchor) == 1, "besmain definition not unique; re-check"
+assert text.count(call_anchor) == 1, "osapi_notify_evm anchor not unique; re-check"
+text = text.replace(decl_anchor, decl + decl_anchor)
+text = text.replace(call_anchor, call + call_anchor)
+open(path, "w").write(text)
+EOF
+    echo "[ok] spp_log_service_init() hooked into besmain (before the event loop)"
 fi
 
 echo

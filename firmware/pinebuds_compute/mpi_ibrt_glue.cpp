@@ -22,6 +22,7 @@
 #include "mpi.h"
 #include "mpi_adapter.h"
 #include "mpi_frag.h"
+#include "spp_log_service.h"
 
 #include <string.h>
 
@@ -348,6 +349,10 @@ int mpi_ibrt_run_rank_handshake(int self_rank) {
     }
 
     COMPUTE_TRACE(2, "[mpi] peer ok rank=%d peer=%d", self_rank, peer_rank);
+    // design §13.4.3 case C: enable connectable mode only after the peer
+    // handshake succeeds, so this never perturbs the §11.2.3 in-case TWS
+    // bring-up sequence the handshake sits on top of.
+    spp_log_enable_connectable();
     return peer_rank;
 }
 

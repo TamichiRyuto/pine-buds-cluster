@@ -4,13 +4,23 @@
 //
 // NOTE: the SDK's TRACE(attr, fmt, ...) takes the number of format
 // arguments as its first parameter, so COMPUTE_TRACE does too.
+//
+// On target, every COMPUTE_TRACE line also reaches compute_log_tap (design
+// docs/design-ibrt-transport.md §13.3.1/§13.3.3), which mirrors the same
+// line over the SPP log channel (firmware/pinebuds_compute/spp_log_service.cpp).
+// UART output (TRACE) is unchanged -- the tap is purely additive.
 #ifndef COMPUTE_TRACE_H
 #define COMPUTE_TRACE_H
 
 #ifdef PINEBUDS_TARGET
 #include "hal_timer.h"
 #include "hal_trace.h"
-#define COMPUTE_TRACE(nargs, fmt, ...) TRACE(nargs, fmt, ##__VA_ARGS__)
+void compute_log_tap(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+#define COMPUTE_TRACE(nargs, fmt, ...)       \
+    do {                                     \
+        TRACE(nargs, fmt, ##__VA_ARGS__);    \
+        compute_log_tap(fmt, ##__VA_ARGS__); \
+    } while (0)
 static inline unsigned compute_tick_ms(void) {
     return (unsigned)GET_CURRENT_MS();
 }
