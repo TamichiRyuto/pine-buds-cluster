@@ -1326,3 +1326,43 @@ PLUGOUT 分岐 (`:523-526`) にある同一のタイマ起動ブロック:
   バッズをケースから取り出して使うことは無い (常にケース内で充電起動する) ので影響は無い。
   工場ファームに戻せば元の挙動に戻る。§12.7 リスク 5 (常用しないこと) と同じ位置づけの
   制約であり、新たなリスク区分を増やすものではない。
+
+### 12.9 Run 4 実測結果 — 全条件 PASS (2026-09-01)
+
+§11.5 (スレッドパーク) + §12.4 (充電起動) + §12.8 (充電器箱イベント遮断) の 3 修正を積んだ
+`BUILD_DATE=Aug 31 2026 16:35:12` (コンテナ UTC) を両バッズに書き込み、ケース内・蓋閉・
+充電状態で再起動した結果:
+
+```
+右: Yin BATTERY 2 → CHARGING PWRON! → bt_stack_init_done:10
+    [mpi] side=RIGHT rank=0 nv_role=[IBRT_MASTER] init_done=1
+    [mpi] init rank=0 size=2 link_wait=200 ms besaud=1
+    [mpi] peer ok rank=0 peer=1 → [mpi] barrier ok
+    GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 expect=32768.000000 PASS
+    GEMM-MPI elapsed=13 ms frames tx=2 rx=4 err=0
+    [mpi] finalize done rank=0
+左: 同経路で rank=1 size=2、link_wait=500 ms、[mpi] send ok、
+    frames tx=2 rx=2 err=0、[mpi] finalize done rank=1
+```
+
+§11.3 の 4 条件 + §12.6 の 2 条件をすべて満たす:
+
+1. rank=0 (右) / rank=1 (左) が片側ずつ — 左右ストラップ由来の静的 rank が設計どおり
+2. 両側 size=2
+3. checksum=32768.000000 厳密一致 (rank=0 が集約して判定。rank=1 は設計上出力しない)
+4. MPI cmdcode 0x8201 の `tws cmd send failed` は左右とも 0 回
+5. `Yin BATTERY 2` / `CHARGING PWRON!` が両側に出た
+6. 両側 `init_done=1`
+
+`### EXCEPTION ###` は左右とも 0 回・リブート無し — §11.5 のパーク対策の実機確認も完了。
+
+備考:
+
+- finalize の後、右ログに SDK 内部 cmdcode 0x8025 の send failed が 1 回だけ出た
+  (finalize の約 160 行後)。計算完了後に SDK が TWS リンクを解放した際の周期送信の
+  空振りであり、MPI 実行には無関係。合否判定 (条件 4) は MPI トラフィック (0x8201) で見る
+- **実機のケースに「背面ボタン」は存在しない** (ユーザー確認、2026-09-01)。
+  §12.5 手順 6・§12.7 リスク 3・manual §4 の「背面ボタン約 5 秒長押し」は SDK README 由来の
+  誤記で、実際に使えたリブート手段の確認後に訂正する
+
+これをもって §11.3 に定義した Phase 1 実機合格条件は **達成**。
