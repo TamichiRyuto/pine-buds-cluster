@@ -20,7 +20,7 @@
 //        inline sees id 0, both see 2 threads, join once after inline
 // [x] R4 omp_set_num_threads: 1 -> no worker; 5 -> clamped to 2;
 //        0 / negative -> ignored
-// [ ] R5 num_threads argument overrides nthreads-var (1 -> sequential,
+// [x] R5 num_threads argument overrides nthreads-var (1 -> sequential,
 //        2 -> team of 2)
 // [ ] R6 worker_start failure -> sequential fallback, no join
 // [ ] R7 nested region runs inline with 1 thread / id 0; outer restored
@@ -237,6 +237,25 @@ static void test_r5_num_threads_argument_overrides_nthreads_var() {
     omp_set_port(0);
 }
 
+static void test_r6_worker_start_failure_falls_back_to_sequential() {
+    install_fake_port();
+    g_fake.start_rc = -1;
+    int payload = 0;
+    reset_seen();
+
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+
+    // The worker refused: run the whole region on the primary, as a team
+    // of one, and never join a worker that never started.
+    CHECK(g_fake.starts == 1);
+    CHECK(g_seen.calls == 1);
+    CHECK(g_seen.num_threads[0] == 1);
+    CHECK(g_seen.thread_num[0] == 0);
+    CHECK(g_fake.joins == 0);
+
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
@@ -246,5 +265,6 @@ int main() {
     RUN_TEST(test_r3_team_of_two_runs_worker_and_inline);
     RUN_TEST(test_r4_set_num_threads_clamps_to_capacity);
     RUN_TEST(test_r5_num_threads_argument_overrides_nthreads_var);
+    RUN_TEST(test_r6_worker_start_failure_falls_back_to_sequential);
     return testfw::summary();
 }

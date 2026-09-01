@@ -74,10 +74,14 @@ extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
 
     if (team >= 2) {
         g_team_size = 2;
-        g_port->worker_start(fn, data);
-        fn(data);
-        g_port->worker_join();
+        if (g_port->worker_start(fn, data) == 0) {
+            fn(data);
+            g_port->worker_join();
+            g_team_size = 1;
+            return;
+        }
         g_team_size = 1;
+        fn(data);
         return;
     }
 
