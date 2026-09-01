@@ -124,6 +124,19 @@ page するだけ)。純正の「ケース外でペアリングモード」は�
 **再起動しないことがある** (充電端子の `PLUGIN` だけ出て `CHARGING PWRON` が出ない)。
 UART で `CHARGING PWRON!` を確認してから次に進む。
 
+### 4b. 5 連タップで GEMM-MPI を再実行する (design doc §14)
+
+起動時ランが終わった後 (`[mpi] finalize done`)、どちらかのバッズを **0.4 秒以内の間隔で 5 回
+タップ**すると両バッズで GEMM-MPI が走り直す (ケース内でも反応する)。単タップ〜4 連・長押しの
+既存機能はそのまま。UART / SPP ログの目印:
+
+- タップした側: `app_key_compute_run event 12` → `[mpi] run #n trigger=local peer_notified=1`
+- 相手側: `[mpi] run #n trigger=peer`
+- 右 (rank 0): `GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 … PASS` → `[mpi] run #n done rank=0`
+- ラン中の連打は `[mpi] tap ignored: run in progress`、起動時ラン前は `tap ignored: boot run not finished`
+
+`peer_notified=0` なら TWS が切れている (相手は走らず、5 秒のストール検出を経て縮退で完走する)。
+
 ## 5. UART の見方
 
 ```bash

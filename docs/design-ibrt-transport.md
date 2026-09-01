@@ -2507,6 +2507,33 @@ Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
 
 - 相手の START が落ちる、または相手がまだ実行中で無視した場合、タップした側だけが走り
   MPI は §11 のストール検出 (5 s) 経由で FAIL 行を出して完走する。ラン中の連打は捨てる
-- `mpi_frag_counters` は累積なので `frames tx/rx` はラン間で増え続ける
-  (`install_seams` の `mpi_frag_init` でリセットされる場合はその限りでない — 実測で確認)
-- ケース内でタッチパッドに触れるかは未確認 (単タップで再生/停止が効くかで判定できる)
+- `frames tx/rx` は `install_seams` → `mpi_frag_init` でラン毎にリセットされる (実測: 各ランで
+  `tx=1 rx=1`)
+- ケース内でもタッチパッドは反応する (実測 §14.4)
+
+### 14.4 実測 (Run 13, 2026-09-01 14:2x)
+
+両バッズ同時再起動 → 起動時ラン (右: `GEMM-MPI … PASS elapsed=12 ms`) の後、ケース内で
+右 → 左 → 右 → 左 の順に 5 連タップ。右 UART (rank 0) と COM6 (今回は左が応答) の記録:
+
+| run | トリガ | 右 (rank 0) の結果 | elapsed |
+|---|---|---|---|
+| #1 | 右タップ (`trigger=local peer_notified=1`) | PASS, size=2, tx=1 rx=1 | 128 ms |
+| #2 | 左タップ (右は `trigger=peer`) | PASS | 5 ms |
+| #3 | 右タップ | PASS | 115 ms |
+| #4 | 左タップ | PASS | 83 ms |
+
+- `app_key_compute_run event 12` (= RAMPAGECLICK) がタップした側の UART に出て、相手側には
+  `[mpi] run #n trigger=peer` が出る。左 (rank 1) は `[mpi] run #n done rank=1` のみ
+  (`GEMM-MPI` 行は rank 0 だけが出す設計)
+- COM6 には `#24 [mpi] run #1 trigger=peer` 〜 `#31 [mpi] run #4 done rank=1` が欠落・重複なく
+  流れた (seq は起動からの通し番号のまま)
+- **elapsed のばらつき**: タップした側が先に走り出し、相手は START の TWS 伝搬 (数十〜百 ms)
+  の後に合流するので、rank 0 が待つ分だけ伸びる (#1/#3 = 右タップ)。相手側からの START で
+  右が後から合流した #2 は 5 ms で、起動時ラン (12 ms) より速い = `app_sysfreq_req(104M)` は
+  効いている。#4 の 83 ms は sniff からの復帰待ちと推測。合否条件 (§13.9-6, 20 ms 以内) は
+  起動時ランにのみ適用し、タップ再実行は「PASS かつ size=2」を合否とする
+- `[spplog] connected` は COM6 オープン 1 回につき**両バッズ**に 2 回ずつ出た (IBRT が
+  RFCOMM イベントを両側に配っている?)。実害は無いが未調査
+- 書き込み直後の単独起動 (左) は `FAIL cmd channel down after 20000 ms` → `size=1` の縮退ランで
+  完走した。同時再起動後は正常
