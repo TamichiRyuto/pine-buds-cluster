@@ -23,7 +23,7 @@
 // [x] R5 num_threads argument overrides nthreads-var (1 -> sequential,
 //        2 -> team of 2)
 // [x] R6 worker_start failure -> sequential fallback, no join
-// [ ] R7 nested region runs inline with 1 thread / id 0; outer restored
+// [x] R7 nested region runs inline with 1 thread / id 0; outer restored
 // [ ] R8 after the region: 1 thread / id 0; omp_set_port(NULL) -> max 1
 
 #include "test_framework.h"
@@ -309,6 +309,29 @@ static void test_r7_nested_region_runs_inline_as_one_thread() {
     omp_set_port(0);
 }
 
+static void test_r8_state_is_reset_after_region_and_port_removal() {
+    install_fake_port();
+    omp_set_num_threads(2);
+    int payload = 0;
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+    CHECK(g_seen.calls == 2);
+
+    // Outside the region only the primary exists again.
+    CHECK(omp_get_num_threads() == 1);
+    CHECK(omp_get_thread_num() == 0);
+
+    // Removing the port drops the capacity back to one; the earlier
+    // request for 2 is clamped, not remembered as an error.
+    omp_set_port(0);
+    CHECK(omp_get_max_threads() == 1);
+    CHECK(omp_get_num_procs() == 1);
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+    CHECK(g_seen.calls == 1);
+    CHECK(g_seen.num_threads[0] == 1);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
@@ -320,5 +343,6 @@ int main() {
     RUN_TEST(test_r5_num_threads_argument_overrides_nthreads_var);
     RUN_TEST(test_r6_worker_start_failure_falls_back_to_sequential);
     RUN_TEST(test_r7_nested_region_runs_inline_as_one_thread);
+    RUN_TEST(test_r8_state_is_reset_after_region_and_port_removal);
     return testfw::summary();
 }
