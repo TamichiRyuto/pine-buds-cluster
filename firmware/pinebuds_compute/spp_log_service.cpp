@@ -3,9 +3,13 @@
 // Streams every line that goes through COMPUTE_TRACE (§13.3.1) to a
 // Windows PC over Bluetooth SPP, in parallel with the unmodified 2 Mbaud
 // UART output. Three independent pieces, per the design:
-//   - §13.2  SDP record (SerialPort 0x1101) + RFCOMM server (channel 19,
-//            the sole unused RFCOMM_CHANNEL_10/BTIF_APP_SPP_SERVER_ID_10
-//            slot in this build, §13.1.2).
+//   - §13.2  SDP record (SerialPort 0x1101) + RFCOMM server on TOTA's slot
+//            (RFCOMM_CHANNEL_3 = 12 / BTIF_APP_SPP_SERVER_ID_3). TOTA ?= 0 in
+//            this build, so the slot is free, and it is the only slot with a
+//            shipping precedent for this exact btif_spp_* call sequence
+//            (app_spp_tota.cpp:307-350). §13.1.2's "sole unused" slot
+//            RFCOMM_CHANNEL_10 (= 19) fails on the device -- device run 8:
+//            "[spplog] init chan=19 setup=0 open=1" (see spp_log_service_init).
 //   - §13.3  The tap (compute_log_tap, called from COMPUTE_TRACE) and the
 //            send thread that drains firmware/pinebuds_compute/log_ring
 //            over btif_spp_write, driven by DATA_SENT.
@@ -32,8 +36,8 @@
 
 // SDK headers. File:line references are to external/OpenPineBuds, verified
 // against docs/design-ibrt-transport.md §13.1-§13.4 during implementation.
-#include "spp_api.h"       // struct spp_device/spp_service, btif_spp_*, RFCOMM_CHANNEL_10, BTIF_SPP_*
-#include "bt_if.h"         // BTIF_APP_SPP_SERVER_ID_10
+#include "spp_api.h"       // struct spp_device/spp_service, btif_spp_*, RFCOMM_CHANNEL_3, BTIF_SPP_*
+#include "bt_if.h"         // BTIF_APP_SPP_SERVER_ID_3
 #include "app_spp.h"       // SPP_RECV_BUFFER_SIZE (= L2CAP_MTU*4, app_spp.h:29-32)
 #include "app_tws_ibrt.h"  // ibrt_ctrl_t, app_tws_ibrt_get_bt_ctrl_ctx, app_tws_ibrt_set_access_mode
 #include "me_api.h"        // BTIF_BAM_CONNECTABLE_ONLY, BTIF_COD_MAJOR_PERIPHERAL
@@ -57,7 +61,7 @@ const U8 kLogSppProtoDescList[] = {
     SDP_UUID_16BIT(PROT_L2CAP),
     SDP_ATTRIB_HEADER_8BIT(5),
     SDP_UUID_16BIT(PROT_RFCOMM),
-    SDP_UINT_8BIT(RFCOMM_CHANNEL_10), /* = 19, sole unused slot, §13.1.2 */
+    SDP_UINT_8BIT(RFCOMM_CHANNEL_3), /* = 12, TOTA's slot; TOTA ?= 0 here */
 };
 
 const U8 kLogSppProfileDescList[] = {
@@ -290,15 +294,48 @@ extern "C" void spp_log_service_init(void) {
     param.COD = BTIF_COD_MAJOR_PERIPHERAL;
     btif_sdp_record_setup(s_record, &param);
 
-    s_service = btif_create_spp_service();
-    s_service->rf_service.serviceId = RFCOMM_CHANNEL_10; /* = 19 */
-    s_service->numPorts = 0;
-    btif_spp_service_setup(s_dev, s_service, s_record);
+    /* portType is set before btif_spp_service_setup, as app_spp.cpp:82-92
+       (app_spp_open) does; it only builds the service/SDP record when the
+       device is already a BTIF_SPP_SERVER_PORT. The original code set it
+       afterwards.
 
+       That alone did not fix anything, though. Device run 8, with the order
+       corrected and the slot still RFCOMM_CHANNEL_10/BTIF_APP_SPP_SERVER_ID_10:
+           _btif_spp_create_channel:local_server_channel=19   <- service_setup
+           dev:0x20038fd4 initial_credit:4                    <- init_device
+           sdp_server_add_global_record ... handle 0x10004    <- btif_spp_open
+           rfcomm_register_server: channel 19 already existing.
+           sppnew_delete_chnl_note:del_chnl_from_chnl_list
+           [spplog] init chan=19 setup=0 open=1               <- BT_STS_FAILED
+       Nothing else registers an RFCOMM server before this point, so the
+       "already existing" is service_setup's own registration being rejected
+       when btif_spp_open registers the same channel again. app_spp_tota.cpp
+       :307-350 issues the identical call sequence and shipped that way, so
+       the remaining difference is the slot: TOTA uses RFCOMM_CHANNEL_3 /
+       BTIF_APP_SPP_SERVER_ID_3. This build has TOTA ?= 0 (no app_spp_tota
+       object in open_source.map), so its slot is free -- take it.
+
+       Symptom of a dead server, for the record: the SDP record still
+       advertised the channel, a PC that followed it landed on the HFP channel
+       (spp_tail.py read "AT+BRSF=767" off COM3), and
+       BTIF_SPP_EVENT_REMDEV_CONNECTED never fired. */
     s_dev->portType = BTIF_SPP_SERVER_PORT;
-    s_dev->app_id = BTIF_APP_SPP_SERVER_ID_10;
+    s_dev->app_id = BTIF_APP_SPP_SERVER_ID_3;
     s_dev->spp_handle_data_event_func = spp_log_rx_discard;
+
+    s_service = btif_create_spp_service();
+    s_service->rf_service.serviceId = RFCOMM_CHANNEL_3; /* = 12 */
+    s_service->numPorts = 0;
+    bt_status_t setup_st = btif_spp_service_setup(s_dev, s_service, s_record);
+
     btif_spp_init_device(s_dev, kSppLogTxSlots,
                          osMutexCreate(osMutex(spp_log_mutex)));
-    btif_spp_open(s_dev, NULL, spp_log_callback); /* NULL = server, listen */
+    bt_status_t open_st =
+        btif_spp_open(s_dev, NULL, spp_log_callback); /* NULL = server, listen */
+
+    /* Both return bt_status_t (spp_api.h:122,135). Until run 8 both were
+       discarded, so there was no way to tell a listening server from a
+       torn-down one; open=0 is the pass condition for the next device run. */
+    TRACE(3, "[spplog] init chan=%d setup=%d open=%d", RFCOMM_CHANNEL_3,
+          setup_st, open_st);
 }
