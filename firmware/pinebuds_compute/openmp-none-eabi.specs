@@ -1,0 +1,9 @@
+# GCC specs override for OpenMP on arm-none-eabi (docs/design-ibrt-transport.md §15.2 item 1).
+# The driver's built-in self-spec turns -fopenmp into "-fopenmp -pthread", and
+# -pthread is not a recognised option on none-eabi targets, so -fopenmp cannot be
+# passed to the driver at all. Instead the object is compiled with -fopenmp-simd
+# (no -pthread injection) and this file forwards a real -fopenmp to cc1/cc1plus.
+# Compile-only: never used on the link line, so no -lgomp is requested;
+# GOMP_parallel comes from adapters/omp/omp_runtime.cpp.
+*cc1_options:
++ %{fopenmp-simd:-fopenmp}

@@ -2689,8 +2689,15 @@ WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォ
 ### 15.2 設計
 
 1. **並列化は GCC に任せる**: `bench/gemm_mpi_omp.cpp` は無改変のまま、apps/main/Makefile に
-   `CFLAGS_gemm_mpi_omp.o += -fopenmp` (このオブジェクトだけ。link には付けないので
-   `-lgomp` は要求されない)。`<omp.h>` は既存の `-Iapps/main` で自前ヘッダが先に解決される
+   `CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=apps/main/openmp-none-eabi.specs`
+   (このオブジェクトだけ。link には付けないので `-lgomp` は要求されない)。
+   **素の `-fopenmp` は使えない**: GCC ドライバの組み込み self-spec (`GOMP_SELF_SPECS`) が
+   `-fopenmp` に `-pthread` を足し、none-eabi では `unrecognized command line option
+   '-pthread'` で止まる (arm-none-eabi-g++ 9.2.1 で実測)。`-fopenmp-simd` はこの self-spec に
+   掛からないので、それを鍵に specs ファイル (`firmware/pinebuds_compute/openmp-none-eabi.specs`、
+   `*cc1_options: + %{fopenmp-simd:-fopenmp}`) で cc1plus にだけ本物の `-fopenmp` を渡す。
+   コンテナ内で `GOMP_parallel` 未定義参照と `run._omp_fn.0` が出ることを確認済み。
+   `<omp.h>` は既存の `-Iapps/main` で自前ヘッダが先に解決される
 2. **ランタイム `adapters/omp/omp_runtime.cpp`** (旧 `omp_stub.cpp` をリネーム、gnu++98):
    libgomp と同じ ABI で上記 3 エントリだけ実装する。libgomp 本体は pthread/futex 前提で
    cp_accel への移植が存在しないため採用しない (同じソースが本物の libgomp で正しいことは
@@ -2774,7 +2781,7 @@ pthread MPI ハーネスで 2 ランクが同時に parallel 領域へ入るテ�
 ### 15.5 リスク
 
 - `-fopenmp` が none-eabi で libgomp の `omp.h` を探しに行く → 自前 `omp.h` を `-I` で先に置く
-  (既に `-Iapps/main`)
+  (既に `-Iapps/main`)。ドライバの `-pthread` 注入は §15.2-1 の specs で回避済み
 - CP 側のクラッシュは MCU の TRACE に `cp_trace_crash_notify` 経由で出る。GEMM の内側ループが
   flash 上の関数を呼ぶと即死する: -O2 で libgcc 呼び出しは出ない見込み (M4 の UDIV/SDIV と
   FPU) だが、map で確認するまで確定しない

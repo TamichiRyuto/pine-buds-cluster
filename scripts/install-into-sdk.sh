@@ -54,10 +54,13 @@
 #      unbound in the fork's key table) calls mpi_ibrt_trigger_run(),
 #      re-running GEMM-MPI on both buds. Single tap stays play/pause
 #  13. OpenMP Stage 2 on the second core (docs/design-ibrt-transport.md §15):
-#      copies omp_adapter.h + omp_cp_port.{h,cpp}, compiles ONLY
-#      gemm_mpi_omp.o with -fopenmp (CFLAGS_<obj>.o hook, scripts/lib.mk:138)
-#      so GCC outlines the bench's `#pragma omp parallel for` into a call to
-#      our GOMP_parallel, and patches scripts/link/best1000.lds.S to place
+#      copies omp_adapter.h + omp_cp_port.{h,cpp} + openmp-none-eabi.specs,
+#      compiles ONLY gemm_mpi_omp.o with OpenMP enabled (CFLAGS_<obj>.o hook,
+#      scripts/lib.mk:138; -fopenmp-simd plus a specs file that forwards
+#      -fopenmp to cc1plus, because the driver would add an unsupported
+#      -pthread for a plain -fopenmp) so GCC outlines the bench's
+#      `#pragma omp parallel for` into a call to our GOMP_parallel, and
+#      patches scripts/link/best1000.lds.S to place
 #      gemm_mpi_omp.o's code in .cp_text_sram next to the SDK's own
 #      `*:cp_queue.o(.text*)` rule -- the CP's MPU denies flash, so the
 #      outlined loop body must live in CP RAM
@@ -100,6 +103,7 @@ cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/adapters/omp/omp_runtime.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/omp_cp_port.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/omp_cp_port.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/openmp-none-eabi.specs \
    "${REPO_ROOT}"/bench/gemm_mpi_omp.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.cpp \
@@ -139,15 +143,21 @@ else
     echo "[ok] apps/main/Makefile already has the SPP pairing opt-in"
 fi
 
+OMP_CFLAGS="CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=apps/main/openmp-none-eabi.specs"
 if ! grep -q "${OMP_MARKER}" "${DST}/Makefile"; then
-    # Per-object flag (scripts/lib.mk:138). Compile-only: -fopenmp never
+    # Per-object flag (scripts/lib.mk:138). Compile-only: OpenMP never
     # reaches the link line, so no -lgomp is requested; GOMP_parallel comes
-    # from omp_runtime.cpp (design §15.2 items 1-2).
-    printf '\n# %s (docs/design-ibrt-transport.md §15)\nCFLAGS_gemm_mpi_omp.o += -fopenmp\n' \
-        "${OMP_MARKER}" >> "${DST}/Makefile"
-    echo "[ok] -fopenmp for gemm_mpi_omp.o added to apps/main/Makefile"
+    # from omp_runtime.cpp (design §15.2 items 1-2). The specs file is why
+    # this is not a plain -fopenmp (see its header comment).
+    printf '\n# %s (docs/design-ibrt-transport.md §15)\n%s\n' \
+        "${OMP_MARKER}" "${OMP_CFLAGS}" >> "${DST}/Makefile"
+    echo "[ok] OpenMP flags for gemm_mpi_omp.o added to apps/main/Makefile"
+elif grep -q '^CFLAGS_gemm_mpi_omp.o += -fopenmp$' "${DST}/Makefile"; then
+    # First revision used a bare -fopenmp, which the none-eabi driver rejects.
+    sed -i "s|^CFLAGS_gemm_mpi_omp.o += -fopenmp\$|${OMP_CFLAGS}|" "${DST}/Makefile"
+    echo "[ok] apps/main/Makefile OpenMP flags migrated to the specs form"
 else
-    echo "[ok] apps/main/Makefile already compiles gemm_mpi_omp.o with -fopenmp"
+    echo "[ok] apps/main/Makefile already compiles gemm_mpi_omp.o with OpenMP"
 fi
 
 if grep -q "${OMP_MARKER}" "${LDS_FILE}"; then
