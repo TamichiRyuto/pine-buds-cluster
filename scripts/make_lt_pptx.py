@@ -73,18 +73,22 @@ def text(slide, x, y, w, h, lines, size=15, name=JP, color=INK, bold=False,
     if isinstance(lines, str):
         lines = [lines]
     for i, item in enumerate(lines):
-        ov = {}
-        if isinstance(item, tuple):
-            item, ov = item
+        # A list item is one paragraph made of several differently styled runs.
+        runs = item if isinstance(item, list) else [item]
+        pov = runs[0][1] if isinstance(runs[0], tuple) else {}
         p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-        p.alignment = ov.get("align", align)
-        p.space_after = Pt(ov.get("space", space))
+        p.alignment = pov.get("align", align)
+        p.space_after = Pt(pov.get("space", space))
         if lh:
             p.line_spacing = lh
-        r = p.add_run()
-        r.text = item
-        font(r, ov.get("name", name), ov.get("size", size),
-             ov.get("bold", bold), ov.get("color", color), ov.get("italic", False))
+        for part in runs:
+            ov = {}
+            if isinstance(part, tuple):
+                part, ov = part
+            r = p.add_run()
+            r.text = part
+            font(r, ov.get("name", name), ov.get("size", size),
+                 ov.get("bold", bold), ov.get("color", color), ov.get("italic", False))
     return sh
 
 
@@ -306,30 +310,34 @@ for i, (nm, mem) in enumerate([("ノード A", "メモリ空間 A"), ("ノード
 arrow(s, 6.06, NY + 0.80, 1.21, 0.68, MSO_SHAPE.LEFT_RIGHT_ARROW, "MPI", 17)
 text(s, 5.90, NY + 1.56, 1.53, 0.8, "メモリが\n物理的に別", size=13, color=MUTED,
      align=PP_ALIGN.CENTER, pad=0.02, space=2)
-text(s, M, 4.06, CW, 0.42,
+text(s, M, 3.98, CW, 0.40,
      "クラスタレベル並列 = MPI :  明示的にメッセージを送り合う (MPI_Send / MPI_Recv / MPI_Barrier)",
      size=14.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.0)
 
-plain_table(s, M, 4.60, 6.30, 1.70, [
+plain_table(s, M, 4.44, 6.30, 1.70, [
     ["", "OpenMP", "MPI"],
     ["メモリ", "共有", "分散 (別空間)"],
     ["コスト", "安い (ns 〜 μs)", "高い (μs 〜 ms)"],
-    ["今回の担当", "イヤホン内の 2 コア (未達)", "イヤホン間 (左 ⇄ 右)"],
+    ["今回の担当", "2 コア並列 (未達)", "イヤホン間 (左 ⇄ 右)"],
 ], widths=[1.5, 2.6, 2.2], size=14, head_size=14, row_h=0.42)
 
-BX, BY, BW = 7.22, 4.60, 5.56
-rect(s, BX, BY, BW, 1.70, WHITE, BOX)
-text(s, BX, BY + 0.06, BW, 0.38, "GEMM (行列積) を 2 ランクに分ける", size=15, bold=True,
+BX, BY, BW = 7.22, 4.44, 5.56
+rect(s, BX, BY, BW, 2.14, WHITE, BOX)
+text(s, BX, BY + 0.06, BW, 0.36, "GEMM (行列積) を 2 ランクに分ける", size=15, bold=True,
      align=PP_ALIGN.CENTER, pad=0.05)
-rect(s, BX + 0.30, BY + 0.50, 2.45, 0.48, FILL2, BOX)
-text(s, BX + 0.30, BY + 0.50, 2.45, 0.48, "rank 0 → 行 0 .. 15", size=14,
+text(s, BX + 0.14, BY + 0.44, BW - 0.28, 0.60, [
+    [("N", {"name": MONO, "bold": True}), " = 行列の一辺。N=32 なら 32×32 の行列"],
+    [("size", {"name": MONO, "bold": True}), " = MPI のランク数 = 参加したバッズの数"],
+], size=13.5, pad=0.03, space=4)
+rect(s, BX + 0.30, BY + 1.08, 2.45, 0.46, FILL2, BOX)
+text(s, BX + 0.30, BY + 1.08, 2.45, 0.46, "rank 0 → 行 0 .. 15", size=14,
      anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.03)
-rect(s, BX + 2.85, BY + 0.50, 2.45, 0.48, FILL, BOX)
-text(s, BX + 2.85, BY + 0.50, 2.45, 0.48, "rank 1 → 行 16 .. 31", size=14,
+rect(s, BX + 2.85, BY + 1.08, 2.45, 0.46, FILL, BOX)
+text(s, BX + 2.85, BY + 1.08, 2.45, 0.46, "rank 1 → 行 16 .. 31", size=14,
      anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.03)
-text(s, BX + 0.12, BY + 1.08, BW - 0.24, 0.56,
-     "集約して rank 0 が checksum を検証 → PASS / FAIL",
-     size=13.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.03)
+text(s, BX + 0.12, BY + 1.62, BW - 0.24, 0.44,
+     "size=1 に縮退しても同じ PASS が出る → size を必ず見る",
+     size=12.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.03)
 
 # ------------------------------------------------------------------ 3
 s = slide("今回のクラスタ構成",
