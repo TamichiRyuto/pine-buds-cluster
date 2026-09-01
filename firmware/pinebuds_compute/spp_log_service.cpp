@@ -240,7 +240,14 @@ void spp_log_thread(void const *argument) {
     }
 }
 
-osThreadDef(spp_log_thread, osPriorityLow, 1, 1024, "spp_log");
+/* 2048 B, not the design's 1024 B (§13.3.4): device run 14 MemFaulted in
+   svcMutexWait on both buds after the thread's stack overflowed. The
+   deepest path runs the SDK's own TRACEs inside btif_spp_write ->
+   rfcomm_dlc_send on this stack, plus a 104 B FPU exception frame when an
+   interrupt lands there, and the linker places the three mutex control
+   blocks (and s_timeouts_seen) directly below the stack array
+   (open_source.map), so an overflow of a few dozen bytes lands in them. */
+osThreadDef(spp_log_thread, osPriorityLow, 1, 2048, "spp_log");
 
 }  // namespace
 
