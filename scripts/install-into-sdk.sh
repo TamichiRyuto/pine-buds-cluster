@@ -53,6 +53,14 @@
 #      apps/main/key_handler.cpp so a 5-tap (APP_KEY_EVENT_RAMPAGECLICK,
 #      unbound in the fork's key table) calls mpi_ibrt_trigger_run(),
 #      re-running GEMM-MPI on both buds. Single tap stays play/pause
+#  13. OpenMP Stage 2 on the second core (docs/design-ibrt-transport.md §15):
+#      copies omp_adapter.h + omp_cp_port.{h,cpp}, compiles ONLY
+#      gemm_mpi_omp.o with -fopenmp (CFLAGS_<obj>.o hook, scripts/lib.mk:138)
+#      so GCC outlines the bench's `#pragma omp parallel for` into a call to
+#      our GOMP_parallel, and patches scripts/link/best1000.lds.S to place
+#      gemm_mpi_omp.o's code in .cp_text_sram next to the SDK's own
+#      `*:cp_queue.o(.text*)` rule -- the CP's MPU denies flash, so the
+#      outlined loop body must live in CP RAM
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -73,6 +81,8 @@ TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
 BOX_EVENT_MARKER="pine-buds-cluster charger box events"
 SPP_LOG_MARKER="pine-buds-cluster SPP log"
+OMP_MARKER="pine-buds-cluster OpenMP CP text"
+LDS_FILE="${SDK_DIR}/scripts/link/best1000.lds.S"
 
 [ -d "${DST}" ] || { echo "error: run scripts/setup-openpinebuds.sh first"; exit 1; }
 
@@ -86,7 +96,10 @@ echo "[ok] sources copied into apps/main/"
 cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/adapters/mpi/mpi_frag.h "${REPO_ROOT}"/adapters/mpi/mpi_core.cpp \
    "${REPO_ROOT}"/adapters/mpi/mpi_frag.cpp \
-   "${REPO_ROOT}"/adapters/omp/omp.h "${REPO_ROOT}"/adapters/omp/omp_runtime.cpp \
+   "${REPO_ROOT}"/adapters/omp/omp.h "${REPO_ROOT}"/adapters/omp/omp_adapter.h \
+   "${REPO_ROOT}"/adapters/omp/omp_runtime.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/omp_cp_port.h \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/omp_cp_port.cpp \
    "${REPO_ROOT}"/bench/gemm_mpi_omp.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.cpp \
@@ -124,6 +137,39 @@ if ! grep -q "${PAIRING_MARKER}" "${DST}/Makefile"; then
     echo "[ok] SPP_LOG_PAIRING=1 opt-in added to apps/main/Makefile"
 else
     echo "[ok] apps/main/Makefile already has the SPP pairing opt-in"
+fi
+
+if ! grep -q "${OMP_MARKER}" "${DST}/Makefile"; then
+    # Per-object flag (scripts/lib.mk:138). Compile-only: -fopenmp never
+    # reaches the link line, so no -lgomp is requested; GOMP_parallel comes
+    # from omp_runtime.cpp (design §15.2 items 1-2).
+    printf '\n# %s (docs/design-ibrt-transport.md §15)\nCFLAGS_gemm_mpi_omp.o += -fopenmp\n' \
+        "${OMP_MARKER}" >> "${DST}/Makefile"
+    echo "[ok] -fopenmp for gemm_mpi_omp.o added to apps/main/Makefile"
+else
+    echo "[ok] apps/main/Makefile already compiles gemm_mpi_omp.o with -fopenmp"
+fi
+
+if grep -q "${OMP_MARKER}" "${LDS_FILE}"; then
+    echo "[ok] linker script already places gemm_mpi_omp.o in .cp_text_sram"
+else
+    python3 - "${LDS_FILE}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §15.2 item 4: the CP cannot execute from
+# flash, so the whole bench object (gemm_bench_run and the outlined
+# gemm_bench_run._omp_fn.0 GCC emits for -fopenmp) goes to CP RAM, using the
+# SDK's own object-level idiom right next to it.
+anchor = "\t\t*:cp_queue.o(.text*)\n"
+addition = anchor + "\t\t*:gemm_mpi_omp.o(.text*) /* pine-buds-cluster OpenMP CP text */\n"
+
+text = open(path).read()
+assert text.count(anchor) == 1, "cp_queue.o .cp_text_sram rule not unique; re-check"
+text = text.replace(anchor, addition)
+open(path, "w").write(text)
+EOF
+    echo "[ok] gemm_mpi_omp.o placed in .cp_text_sram (scripts/link/best1000.lds.S)"
 fi
 
 if grep -q "${MARKER}" "${APPS_CPP}"; then

@@ -22,6 +22,8 @@
 #include "mpi.h"
 #include "mpi_adapter.h"
 #include "mpi_frag.h"
+#include "omp.h"
+#include "omp_cp_port.h"
 #include "run_trigger.h"
 #include "spp_log_service.h"
 
@@ -118,7 +120,7 @@ osSemaphoreDef(mpi_ibrt_run_sem);
 osMutexDef(mpi_ibrt_trigger_mutex);
 
 int g_self_rank = 0;
-uint32_t g_wtime_base_ms = 0;
+uint32_t g_wtime_base_fast = 0;
 
 // Written on BesbtThread by the RX handler, read on the compute thread only
 // after a successful osSemaphoreWait on g_probe_sem -- the semaphore
@@ -319,14 +321,21 @@ int mpi_ibrt_transport_send(int src, int dest, int tag, const void *buf,
     return mpi_frag_send(src, dest, tag, buf, byte_len);
 }
 
+// Design §15.2 item 5: µs resolution from the 6.5 MHz fast timer so the
+// three compare modes (a few ms each for N=32) are distinguishable. 64-bit
+// arithmetic instead of FAST_TICKS_TO_US, whose tick*10 wraps after 66 s.
+uint32_t mpi_ibrt_fast_ticks_to_us(uint32_t ticks) {
+    return (uint32_t)(((uint64_t)ticks * 1000000u) / CONFIG_FAST_SYSTICK_HZ);
+}
+
 double mpi_ibrt_wtime(void) {
     // The target build uses -fsingle-precision-constant, which makes the
     // unsuffixed literal below parse as float; cast it to double explicitly
     // so the promotion is intentional rather than an implicit
     // -Wdouble-promotion warning (design §10 risk 8: MPI_Wtime is double
     // by API contract even though the FPU is single-precision-only).
-    return (double)(uint32_t)(GET_CURRENT_MS() - g_wtime_base_ms) *
-           (double)0.001;
+    uint32_t ticks = (uint32_t)(hal_fast_sys_timer_get() - g_wtime_base_fast);
+    return (double)mpi_ibrt_fast_ticks_to_us(ticks) * (double)0.000001;
 }
 
 // ---------------------------------------------------------------------
@@ -493,17 +502,27 @@ void mpi_ibrt_run_mt2(int rank) {
 // M-T3: unmodified bench (design §9). Rank 0 -- which is also the single
 // bud in a degraded (size==1) run -- prints the checksum/timing lines;
 // printing rank/size lets the log tell a real 2-bud run apart from a
-// degraded single-bud one that also happens to pass.
-void mpi_ibrt_run_mt3(int rank, int size) {
-    const int kN = 32;
+// degraded single-bud one that also happens to pass. `mode` labels the
+// compare-run configuration (design §15.2 item 6) and the result feeds the
+// GEMM-CMP summary.
+const int kBenchN = 32;
+
+struct mt3_result {
+    unsigned elapsed_us;
+    int pass;
+};
+
+mt3_result mpi_ibrt_run_mt3(int rank, int size, const char *mode) {
     const float kExpect = 32768.0f; /* 32^3 */
     float checksum = 0.0f;
+    mt3_result r;
 
     double t0 = MPI_Wtime();
-    int rc = gemm_bench_run(kN, &checksum);
+    int rc = gemm_bench_run(kBenchN, &checksum);
     double t1 = MPI_Wtime();
 
-    unsigned elapsed_ms = (unsigned)((t1 - t0) * (double)1000.0);
+    r.elapsed_us = (unsigned)((t1 - t0) * (double)1000000.0);
+    r.pass = (rc == 0) && (checksum == kExpect);
 
     unsigned tx = 0;
     unsigned rx = 0;
@@ -511,15 +530,67 @@ void mpi_ibrt_run_mt3(int rank, int size) {
     mpi_frag_counters(&tx, &rx, &err);
 
     if (rank == 0) {
-        int pass = (rc == 0) && (checksum == kExpect);
-        COMPUTE_TRACE(6,
-                      "GEMM-MPI N=%d rank=%d size=%d checksum=%d.000000 "
-                      "expect=%d.000000 %s",
-                      kN, rank, size, (int)checksum, (int)kExpect,
-                      pass ? "PASS" : "FAIL");
-        COMPUTE_TRACE(4, "GEMM-MPI elapsed=%u ms frames tx=%u rx=%u err=%u",
-                      elapsed_ms, tx, rx, err);
+        COMPUTE_TRACE(8,
+                      "GEMM-MPI mode=%s N=%d rank=%d size=%d threads=%d "
+                      "checksum=%d.000000 expect=%d.000000 %s",
+                      mode, kBenchN, rank, size, omp_get_max_threads(),
+                      (int)checksum, (int)kExpect, r.pass ? "PASS" : "FAIL");
+        COMPUTE_TRACE(5,
+                      "GEMM-MPI mode=%s elapsed=%u us frames tx=%u rx=%u "
+                      "err=%u",
+                      mode, r.elapsed_us, tx, rx, err);
     }
+    return r;
+}
+
+// Design §15.2 item 6: run the bench three ways and report the speed-up
+// against a single core on a single bud. Collectives first (mpi, then
+// mpi+omp with the CP worker), the local single run last, so both buds
+// leave the 2-rank seams at the same point before re-bootstrapping as
+// size 1. Every rank prints its own GEMM-CMP lines: COM6 only ever shows
+// the IBRT master's ring (§13.14-4), and either side can be master.
+void mpi_ibrt_speedup_parts(unsigned base_us, unsigned mode_us, int *whole,
+                            int *frac2) {
+    float sp = (mode_us == 0u) ? 0.0f : (float)base_us / (float)mode_us;
+    int frac6 = 0;
+    mpi_ibrt_float_to_parts(sp, whole, &frac6);
+    *frac2 = frac6 / 10000;
+}
+
+void mpi_ibrt_run_compare(int rank, int size) {
+    mpi_ibrt_install_seams(rank, size);
+    omp_set_num_threads(1);
+    mt3_result r_mpi = mpi_ibrt_run_mt3(rank, size, "mpi");
+    MPI_Finalize();
+
+    mpi_ibrt_install_seams(rank, size);
+    omp_set_num_threads(omp_get_num_procs());
+    mt3_result r_omp = mpi_ibrt_run_mt3(rank, size, "mpi+omp");
+    int omp_threads = omp_get_max_threads();
+    MPI_Finalize();
+
+    mpi_ibrt_install_seams(0, 1);
+    omp_set_num_threads(1);
+    mt3_result r_single = mpi_ibrt_run_mt3(0, 1, "single");
+    MPI_Finalize();
+
+    int all_pass = r_mpi.pass && r_omp.pass && r_single.pass;
+    int w_mpi = 0, f_mpi = 0, w_omp = 0, f_omp = 0;
+    mpi_ibrt_speedup_parts(r_single.elapsed_us, r_mpi.elapsed_us, &w_mpi,
+                           &f_mpi);
+    mpi_ibrt_speedup_parts(r_single.elapsed_us, r_omp.elapsed_us, &w_omp,
+                           &f_omp);
+    COMPUTE_TRACE(8,
+                  "GEMM-CMP N=%d rank=%d size=%d threads=%d single=%u us "
+                  "mpi=%u us mpiomp=%u us %s",
+                  kBenchN, rank, size, omp_threads, r_single.elapsed_us,
+                  r_mpi.elapsed_us, r_omp.elapsed_us,
+                  all_pass ? "PASS" : "FAIL");
+    COMPUTE_TRACE(6,
+                  "GEMM-CMP rank=%d speedup vs single: mpi=x%d.%02d "
+                  "mpiomp=x%d.%02d worker_on_cp=%u",
+                  rank, w_mpi, f_mpi, w_omp, f_omp,
+                  omp_cp_port_worker_runs());
 }
 
 // ---------------------------------------------------------------------
@@ -544,7 +615,7 @@ void mpi_ibrt_install_seams(int rank, int size) {
         &mpi_ibrt_transport_send};
     mpi_adapter_set_transport(&s_transport);
 
-    g_wtime_base_ms = (uint32_t)GET_CURRENT_MS();
+    g_wtime_base_fast = hal_fast_sys_timer_get();
     mpi_adapter_set_wtime(&mpi_ibrt_wtime);
 
     static const mpi_frag_port s_frag_port = {
@@ -567,6 +638,12 @@ void mpi_compute_thread(void const *argument) {
     int degraded = 0;
     int rank = 0;
     unsigned link_wait_ms = 0;
+
+    // Design §15: bring up the second core once, before any bench runs.
+    // gemm_bench_run lives in .cp_text_sram, which is only loaded when the
+    // CP first boots, so this must precede the first call into the bench.
+    // On failure the OpenMP runtime stays sequential (still one core).
+    omp_cp_port_init();
 
     // §11.2.2: rank comes from the L/R strap, latched before BT bring-up
     // (app_tws_set_side_from_gpio() at app_init entry, apps.cpp:1926) --
@@ -697,9 +774,8 @@ void mpi_compute_thread(void const *argument) {
         mpi_ibrt_run_mt2(self_rank);
     }
 
-    mpi_ibrt_run_mt3(self_rank, size);
+    mpi_ibrt_run_compare(self_rank, size);
 
-    MPI_Finalize();
     COMPUTE_TRACE(1, "[mpi] finalize done rank=%d", self_rank);
 
     // Never return: with __RTX_CPU_STATISTICS__=1 this SDK's RTX faults on
@@ -715,9 +791,7 @@ void mpi_compute_thread(void const *argument) {
         osSemaphoreWait(g_run_sem, osWaitForever);
         unsigned seq = g_trigger.seq;
         app_sysfreq_req(APP_SYSFREQ_USER_APP_4, APP_SYSFREQ_104M);
-        mpi_ibrt_install_seams(self_rank, size);
-        mpi_ibrt_run_mt3(self_rank, size);
-        MPI_Finalize();
+        mpi_ibrt_run_compare(self_rank, size);
         app_sysfreq_req(APP_SYSFREQ_USER_APP_4, APP_SYSFREQ_32K);
         COMPUTE_TRACE(2, "[mpi] run #%u done rank=%d", seq, self_rank);
         osMutexWait(g_trigger_mutex, osWaitForever);
