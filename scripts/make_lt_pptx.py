@@ -13,8 +13,16 @@ from pptx.enum.text import PP_ALIGN, MSO_ANCHOR
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.oxml.ns import qn
 
-OUT = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                   "slides", "lt-ear-parallel.pptx")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+OUT = os.path.join(ROOT, "slides", "lt-ear-parallel.pptx")
+
+# Drop a real photo at slides/assets/pinebuds.<ext> and it is embedded on slide 5.
+PHOTO = None
+for _ext in ("jpg", "jpeg", "png", "JPG", "JPEG", "PNG"):
+    _cand = os.path.join(ROOT, "slides", "assets", "pinebuds." + _ext)
+    if os.path.exists(_cand):
+        PHOTO = _cand
+        break
 
 W, H = 13.333, 7.5
 M = 0.55                      # page margin
@@ -152,6 +160,21 @@ def hline(slide, x, y, w, color=RULE, lw=1.0):
     ln.line.color.rgb = color
     ln.line.width = Pt(lw)
     return ln
+
+
+def photo(slide, x, y, w, h, path, caption=None):
+    """Fit an image inside the frame, preserving aspect ratio, centred."""
+    from PIL import Image
+    iw, ih = Image.open(path).size
+    inner_h = h - (0.28 if caption else 0.0)
+    scale = min(w / iw, inner_h / ih)
+    pw, ph = iw * scale, ih * scale
+    slide.shapes.add_picture(path, Inches(x + (w - pw) / 2), Inches(y + (inner_h - ph) / 2),
+                             Inches(pw), Inches(ph))
+    rect(slide, x + (w - pw) / 2, y + (inner_h - ph) / 2, pw, ph, None, RULE)
+    if caption:
+        text(slide, x, y + inner_h, w, 0.28, caption, size=10, color=FAINT,
+             align=PP_ALIGN.CENTER, pad=0.0)
 
 
 def plain_table(slide, x, y, w, h, data, widths=None, size=11.5, head_size=11.5,
@@ -370,16 +393,22 @@ plain_table(s, M, 1.24, 7.35, 4.6, [
     ["実測残量", "RAM 約 330 KB 空き / Flash 約 3.2 MB 空き (.map 集計)"],
     ["位置づけ", "実売 1 万円前後、普通に音楽が聴ける TWS イヤホン"],
 ], widths=[1.35, 6.0], size=11.5, row_h=0.40)
-rect(s, 8.20, 1.24, 4.58, 1.55, FILL, RULE)
-text(s, 8.20, 1.24, 4.58, 1.55, "[  PineBuds Pro の写真をここに  ]", size=13, color=FAINT,
-     align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE, pad=0.1)
-panel(s, 8.20, 2.95, 4.58, 2.10, [
+if PHOTO:
+    photo(s, 8.20, 1.24, 4.58, 2.10, PHOTO,
+          "PineBuds Pro 本体と充電ケース (ケースが USB → デュアル UART プログラマ)")
+else:
+    rect(s, 8.20, 1.24, 4.58, 2.10, FILL, RULE)
+    text(s, 8.20, 1.24, 4.58, 2.10,
+         "[  PineBuds Pro の写真をここに  ]\nslides/assets/pinebuds.jpg を置いて\n"
+         "scripts/make_lt_pptx.py を再実行",
+         size=12, color=FAINT, align=PP_ALIGN.CENTER, anchor=MSO_ANCHOR.MIDDLE, pad=0.1, space=3)
+panel(s, 8.20, 3.50, 4.58, 1.90, [
     ("ケースに USB-C を挿すと", {"space": 4}),
     ("/dev/ttyACM0 (右) と /dev/ttyACM1 (左)", {"space": 4, "name": MONO, "size": 11.5}),
     ("が生えて、bestool write-image で自作ファームが焼ける。", {"space": 8}),
     ("イヤホンなのに、開発ボードとして完結している。", {"space": 0, "bold": True}),
 ], size=12.5, head="つまり")
-code(s, 8.20, 5.22, 4.58, 1.42, [
+code(s, 8.20, 5.56, 4.58, 1.28, [
     "$ picocom -b 2000000 /dev/ttyACM0",
     "[ctor] GlobalProbe constructed",
     "hello, C++ from PineBuds (core=0)",

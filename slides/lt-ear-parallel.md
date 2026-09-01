@@ -114,6 +114,9 @@ rank 0 → 行 0..15 を計算    rank 1 → 行 16..31 を計算
 | 実測残量 | RAM 約 330 KB 空き / Flash 約 3.2 MB 空き (`.map` 集計) |
 | 価格帯 | 実売 1 万円前後の、普通に音楽が聴ける TWS イヤホン |
 
+> 写真: `slides/assets/pinebuds.jpg` を置いて `scripts/make_lt_pptx.py` を再実行すると、
+> pptx のスライド 5 右上の枠にアスペクト比を保ったまま自動で埋め込まれる。
+
 **つまり**: ケースに USB-C を挿すと `/dev/ttyACM0` (右) と `/dev/ttyACM1` (左) が生えて、
 `bestool write-image` で自作ファームが焼ける。**イヤホンなのに開発ボードとして完結している。**
 
