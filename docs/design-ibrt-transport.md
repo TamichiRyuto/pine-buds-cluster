@@ -2444,3 +2444,10 @@ Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
    COM オープン失敗の読み方: `FILE_NOT_FOUND` = Windows ローカル (ポート再作成)、
    `REM_NOT_LIST` = 相手不在 (バッズ電源断)、`ACCESS_DENIED` = 別プロセスが掴んでいる、
    open 成功 + `AT+BRSF` = HFP 着地 (サーバ不在 / SDP キャッシュが古い)。
+10. **Run 12 (13:53, ユーザー操作)。** 両バッズ再起動後に Windows 側で `spp_tail.py COM6` を
+    起動したところ、今度は**左バッズ (rank 1)** が応答し `#0`〜`#23` が**欠落・重複なし**で届いた
+    (`run-20260901-135303.log`、`!! GAP` 0 回 — §13.9 条件 4 をこのランは満たす)。
+    どちらのバッズが応答するかは Windows がどちらの page scan に当たるかで決まる (両側が同じ
+    BD アドレスを広告)。同ランの `[mpi-t1]` は `probe len=512 ok` / `max_payload=512` /
+    `rtt n=100 min=44 avg=169 max=407 ms` で、Run 11 (右, `max_payload=4`) より大幅に良い。
+    初回チャンクの重複 (6) は再現せず。
