@@ -86,7 +86,7 @@ echo "[ok] sources copied into apps/main/"
 cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/adapters/mpi/mpi_frag.h "${REPO_ROOT}"/adapters/mpi/mpi_core.cpp \
    "${REPO_ROOT}"/adapters/mpi/mpi_frag.cpp \
-   "${REPO_ROOT}"/adapters/omp/omp.h "${REPO_ROOT}"/adapters/omp/omp_stub.cpp \
+   "${REPO_ROOT}"/adapters/omp/omp.h "${REPO_ROOT}"/adapters/omp/omp_runtime.cpp \
    "${REPO_ROOT}"/bench/gemm_mpi_omp.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/mpi_ibrt_glue.cpp \

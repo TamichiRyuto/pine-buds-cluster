@@ -1,4 +1,4 @@
-// Host-side TDD tests for the OpenMP Stage-1 stub (adapters/omp).
+// Host-side TDD tests for the OpenMP runtime (adapters/omp).
 //
 // Stage 1 of the unmodified-benchmark strategy: provide omp.h so sources
 // including it compile, with pragmas ignored and everything sequential.

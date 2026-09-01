@@ -11,7 +11,7 @@ MPISRC   := $(wildcard adapters/mpi/*.cpp)
 OMPSRC   := $(wildcard adapters/omp/*.cpp)
 TESTBIN  := $(BUILDDIR)/test_gemm
 MPIBIN   := $(BUILDDIR)/test_mpi_adapter
-OMPBIN   := $(BUILDDIR)/test_omp_stub
+OMPBIN   := $(BUILDDIR)/test_omp_runtime
 BENCHBIN := $(BUILDDIR)/test_gemm_bench
 FRAGBIN  := $(BUILDDIR)/test_mpi_frag
 RINGBIN  := $(BUILDDIR)/test_log_ring
@@ -56,9 +56,9 @@ $(MPIBIN): tests/test_mpi_adapter.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tes
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -pthread -Iadapters/mpi -Itests tests/test_mpi_adapter.cpp $(MPISRC) -o $@
 
-$(OMPBIN): tests/test_omp_stub.cpp $(OMPSRC) $(wildcard adapters/omp/*.h) tests/test_framework.h
+$(OMPBIN): tests/test_omp_runtime.cpp $(OMPSRC) $(wildcard adapters/omp/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) -Iadapters/omp -Itests tests/test_omp_stub.cpp $(OMPSRC) -o $@
+	$(CXX) $(CXXFLAGS) -Iadapters/omp -Itests tests/test_omp_runtime.cpp $(OMPSRC) -o $@
 
 $(FRAGBIN): tests/test_mpi_frag.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)

@@ -1,4 +1,4 @@
-// Stage-1 OpenMP stub: sequential execution, single implicit thread.
+// OpenMP runtime for the unmodified-benchmark strategy (adapters/omp).
 #include "omp.h"
 
 #include <time.h>
