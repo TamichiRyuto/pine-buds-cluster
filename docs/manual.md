@@ -132,7 +132,7 @@ UART で `CHARGING PWRON!` を確認してから次に進む。
 
 - タップした側: `app_key_compute_run event 12` → `[mpi] run #n trigger=local peer_notified=1`
 - 相手側: `[mpi] run #n trigger=peer`
-- 右 (rank 0): `GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 … PASS` → `[mpi] run #n done rank=0`
+- 右 (rank 0): `GEMM-MPI mode=mpi N=32 rank=0 size=2 … PASS` ×3 モード → `GEMM-CMP …` (§4d) → `[mpi] run #n done rank=0`
 - ラン中の連打は `[mpi] tap ignored: run in progress`、起動時ラン前は `tap ignored: boot run not finished`
 
 `peer_notified=0` なら TWS が切れている (相手は走らず、5 秒のストール検出を経て縮退で完走する)。
@@ -166,6 +166,41 @@ scripts/spp_latency/com_kill.sh
 
 `+0.019 s` 〜 `+0.084 s` のようにミリ秒台で出る行がライブ配信、`+6 s` 前後の行は開く前に
 リングに溜まっていた分。2026-09-01 の実測は n=8 で min 19 / avg 40 / max 84 ms。
+
+### 4d. 3 モード比較ラン — MPI+OpenMP / MPI 単体 / シングルの速度向上率 (design doc §15)
+
+起動時ランと 5 連タップのランは、同じ N=32 の GEMM ベンチを 3 通りの構成で連続して走らせる
+(順序は mpi → mpi+omp → single)。各バッズが自分の結果を出すので、COM6 に master 側しか
+出なくても比較行は必ず読める。
+
+| mode | バッズ | コア | 意味 |
+|---|---|---|---|
+| `mpi` | 2 (size=2) | 1 | 従来の GEMM-MPI。行を左右で半分ずつ |
+| `mpi+omp` | 2 | 2 (threads=2) | 各バッズが自分の行をさらに CP (第 2 コア) と半分ずつ |
+| `single` | 1 (size=1) | 1 | 基準。1 バッズ 1 コアで全行 |
+
+出る行 (UART と SPP ログの両方):
+
+```
+[omp] cp open ok after 3 ms                                  ← 起動時に CP を開いた
+GEMM-MPI mode=mpi N=32 rank=0 size=2 threads=1 checksum=32768.000000 expect=32768.000000 PASS
+GEMM-MPI mode=mpi elapsed=1234 us frames tx=1 rx=1 err=0
+GEMM-MPI mode=mpi+omp N=32 rank=0 size=2 threads=2 checksum=... PASS
+GEMM-MPI mode=mpi+omp elapsed=... us frames ...
+GEMM-MPI mode=single N=32 rank=0 size=1 threads=1 checksum=... PASS
+GEMM-MPI mode=single elapsed=... us frames tx=0 rx=0 err=0
+GEMM-CMP N=32 rank=0 size=2 threads=2 single=... us mpi=... us mpiomp=... us PASS
+GEMM-CMP rank=0 speedup vs single: mpi=x0.85 mpiomp=x1.40 worker_on_cp=2
+```
+
+- `speedup` = single の elapsed ÷ そのモードの elapsed。1.00 未満は「1 バッズ 1 コアより遅い」
+  (MPI の Allreduce が TWS リンクを往復する分が上乗せされる)
+- `worker_on_cp` は起動からの累計で、CP 側で実際に走った parallel 領域の回数。`mpi+omp` を
+  1 回走らせるごとに 1 増えるのが正常。増えなければ第 2 コアは使われていない
+  (`[omp] FAIL cp open …` か `[omp] FAIL worker timeout` が手前に出る)
+- `threads=1` のまま `mpi+omp` が出るときは CP open に失敗して逐次にフォールバックしている
+- elapsed は µs (fast timer)。従来の `elapsed=%u ms` 行は無くなった
+- `GEMM-MPI mode=single … rank=0 size=1` は左右どちらのバッズも出す (single は各自ローカルに走る)
 
 ## 5. UART の見方
 
