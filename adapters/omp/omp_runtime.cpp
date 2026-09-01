@@ -1,5 +1,6 @@
 // OpenMP runtime for the unmodified-benchmark strategy (adapters/omp).
 #include "omp.h"
+#include "omp_adapter.h"
 
 #include <time.h>
 
@@ -9,6 +10,8 @@ namespace {
     double wtime_seconds(void) {
         return (double)clock() / (double)CLOCKS_PER_SEC;
     }
+
+    const omp_port *g_port = 0;
 }
 
 extern "C" int omp_get_num_threads(void) {
@@ -33,4 +36,15 @@ extern "C" void omp_set_num_threads(int n) {
 
 extern "C" double omp_get_wtime(void) {
     return wtime_seconds();
+}
+
+extern "C" void omp_set_port(const omp_port *port) {
+    g_port = port;
+}
+
+extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
+                               unsigned num_threads, unsigned flags) {
+    (void)num_threads;
+    (void)flags;
+    fn(data);
 }
