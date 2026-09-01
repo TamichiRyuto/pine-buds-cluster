@@ -264,15 +264,15 @@ panel(s, M, 1.26, 4.10, 2.66, [
 panel(s, 4.92, 1.26, CW - 4.37, 2.66, [
     ("1.  ワイヤレスイヤホン 2 個を、2 ノードの計算クラスタにした", {"space": 12}),
     ("2.  MPI を自作し、イヤホン同士の Bluetooth リンクに載せた", {"space": 12}),
-    ("3.  標準 MPI API のベンチを、1 行も変えずに実機で PASS させた", {"space": 4}),
-    ("     (OpenMP は API 互換のスタブ。ノード内 2 コア並列はまだ)",
+    ("3.  標準 MPI + OpenMP のベンチを、1 行も変えずに実機で PASS させた", {"space": 4}),
+    ("     ノード間は Bluetooth、ノード内は第 2 コア。計 4 コアで走った",
      {"space": 0, "size": 13, "color": MUTED}),
 ], size=17, head="3 行サマリ")
 
 tiles = [
-    ("2 ノード", "右 = rank 0 / 左 = rank 1"),
+    ("2 ノード × 2 コア", "計 4 コアで 1 つの行列積"),
     ("checksum = 32768", "float32 で厳密一致 → PASS"),
-    ("max_payload 512 B", "ヘッダ 300 / バイナリ 672 / 実測 512"),
+    ("並列領域 x3.1", "計算部分は 4 コアぶん速くなった"),
     ("1,788 checks", "実機に焼く前のホストテスト"),
     ("5 連タップ", "耳を叩くと両バッズで再実行"),
     ("80+ commits", "2026-08-18 → 09-01 の 2 週間"),
@@ -318,7 +318,7 @@ plain_table(s, M, 4.44, 6.30, 1.70, [
     ["", "OpenMP", "MPI"],
     ["メモリ", "共有", "分散 (別空間)"],
     ["コスト", "安い (ns 〜 μs)", "高い (μs 〜 ms)"],
-    ["今回の担当", "2 コア並列 (未達)", "イヤホン間 (左 ⇄ 右)"],
+    ["今回の担当", "2 コア並列 (実測 x3.1)", "イヤホン間 (左 ⇄ 右)"],
 ], widths=[1.5, 2.6, 2.2], size=14, head_size=14, row_h=0.42)
 
 BX, BY, BW = 7.22, 4.44, 5.56
@@ -369,7 +369,7 @@ text(s, 4.30, 4.62, 4.72, 0.38, "Windows PC   (COM6)", size=15, bold=True,
 text(s, 4.30, 5.00, 4.72, 0.44, "#23 GEMM-MPI ... PASS", size=14, name=MONO,
      color=MUTED, align=PP_ALIGN.CENTER, pad=0.05)
 cols = [("ノード間 = MPI", "自作 MPI を IBRT に載せた"),
-        ("ノード内 = OpenMP", "逐次スタブ。2 コア目は未使用"),
+        ("ノード内 = OpenMP", "第 2 コア (CP) で並列領域を実行"),
         ("観測 = SPP", "seq 番号で欠落・重複を検出")]
 tw = (CW - 2 * 0.22) / 3
 for i, (h, b) in enumerate(cols):
@@ -521,8 +521,8 @@ for i, (h, b) in enumerate(cc):
     text(s, cx, 3.94, ccw, 0.28, "・ " + h, size=13, bold=True, pad=0.0)
     text(s, cx + 0.20, 4.18, ccw - 0.20, 0.28, b, size=12, color=MUTED, pad=0.0)
 stats = [("14 時間", "実作業時間 (ログのイベント間隔から集計)"),
-         ("$480", "API 料金換算。83% がプロンプトキャッシュ"),
-         ("103 コミット", "うち 102 が Co-Authored-By: Claude")]
+         ("$490", "API 料金換算。87% がプロンプトキャッシュ"),
+         ("112 コミット", "うち 111 が Co-Authored-By: Claude")]
 for i, (big, cap) in enumerate(stats):
     cx = M + 0.20 + i * (ccw + 0.20)
     rect(s, cx, 4.52, ccw, 0.62, WHITE, BOX)
@@ -720,44 +720,49 @@ text(s, M, 6.12, CW, 0.62,
      size=17, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.1)
 
 # ------------------------------------------------------------------ 13
-s = slide("結果 ③ — 数字で見る",
-          note="「速くなりませんでした」で終わらせず、なぜ遅いかが定量的に説明できることを成果にする。"
-               "ここが最大の山場。表を指す前に口頭でオチを言う。")
-plain_table(s, M, 1.22, 7.55, 1.95, [
-    ["指標", "実測値", "コメント"],
-    ["GEMM N=32  単コア", "5 〜 10 ms", "基準"],
-    ["GEMM N=32  2 ノード", ("12 〜 13 ms", {"bold": True}), ("通信込み。遅くなった", {"bold": True})],
-    ["アイドルからの往復", "最大 407 ms", "ランごとに大きく変動"],
-], widths=[2.8, 2.2, 3.0], size=14.5, head_size=14, row_h=0.48)
-rect(s, M, 3.42, 7.55, 1.14, FILL2, BOX)
-text(s, M, 3.54, 7.55, 0.52, "単コア 5〜10 ms   →   2 ノード 12〜13 ms", size=21,
+s = slide("結果 ③ — 3 モード比較 (最新の Run 16)",
+          note="ここが最大の山場。「計算は 4 コアぶん速くなった。が、その利得を Bluetooth の"
+               "復帰待ちが丸ごと食った」を言い切る。worker_on_cp が毎回 +1 しているのが"
+               "第 2 コアが本当に走った証拠。sniff を外す対策は実装済みで計測はこれから。")
+plain_table(s, M, 1.22, 7.55, 2.00, [
+    ["mode", "バッズ", "コア", "elapsed", "vs single"],
+    ["single", "1", "1", "3,783 µs", "基準"],
+    ["mpi", "2", "各 1", "3,683 µs", ("x1.02", {"bold": True})],
+    ["mpi+omp", "2", ("各 2", {"bold": True}), "313,258 µs", ("x0.01", {"bold": True})],
+], widths=[1.9, 1.1, 1.1, 1.9, 1.5], size=14.5, head_size=14, row_h=0.48)
+rect(s, M, 3.36, 7.55, 1.06, FILL2, BOX)
+text(s, M, 3.46, 7.55, 0.50, "並列領域そのもの:  3,783 µs  →  1,226 µs   (x3.1)", size=19,
      bold=True, align=PP_ALIGN.CENTER, pad=0.05)
-text(s, M, 4.06, 7.55, 0.36, "分散したぶんだけ遅くなった", size=14,
+text(s, M, 3.96, 7.55, 0.34, "2 バッズ × 2 コア = 4 コアぶんの効果は出ている", size=14,
      align=PP_ALIGN.CENTER, pad=0.05)
-panel(s, M, 4.74, 7.55, 1.58, [
-    ("407 ms は 100 回連続プローブ中の値で、GEMM 実行中の", {"space": 5}),
-    ("レイテンシではない。省電力状態から叩き起こすとここまで伸びる。",
-     {"space": 0, "color": MUTED}),
-], size=14, head="407 ms の読み方")
-rect(s, 8.32, 1.22, 4.46, 5.10, FILL, BOX)
-rect(s, 8.32, 1.22, 4.46, 0.48, FILL2, BOX)
-text(s, 8.32, 1.22, 4.46, 0.48, "なぜ遅いのか = この実験の本題", size=15.5, bold=True,
-     anchor=MSO_ANCHOR.MIDDLE, pad=0.14)
-rows13 = [("① 分割で浮く計算", "65,000 flop を半分に\n→  数 ms"),
-          ("② 往復に要る時間", "リンクが生きていても 数 ms\n→  ① とほぼ相殺"),
-          ("③ アイドルからの往復", "最大 407 ms\n=  単コア GEMM 40 〜 80 回ぶん")]
-for i, (h, b) in enumerate(rows13):
-    ry = 1.86 + i * 1.10
-    rect(s, 8.52, ry, 4.06, 1.00, WHITE, BOX)
-    text(s, 8.52, ry + 0.06, 4.06, 0.34, h, size=14, bold=True, align=PP_ALIGN.CENTER, pad=0.04)
-    text(s, 8.52, ry + 0.40, 4.06, 0.58, b, size=12.5, color=MUTED, align=PP_ALIGN.CENTER,
-         pad=0.04, space=2)
-text(s, 8.44, 5.28, 4.22, 0.92,
-     "「計算量 / 通信量」が小さい問題を\n分散してはいけない", size=17, bold=True,
-     align=PP_ALIGN.CENTER, pad=0.06, space=4)
-rect(s, M, 6.40, CW, 0.58, FILL2, BOX)
-text(s, M, 6.40, CW, 0.58,
-     "速くはならなかった。が、HPC の教科書どおりの結論を、耳の中で定量的に再現できた。",
+panel(s, M, 4.56, 7.55, 1.76, [
+    ("・ mpi+omp の elapsed が常に 313 〜 318 ms なのは、2 回目の Allreduce が", {"space": 4}),
+    ("   省電力 (sniff) からの復帰を約 300 ms 待つため", {"space": 8, "color": MUTED}),
+    ("・ リンクが起きている時の実力が mpi の x1.02 — 半分の行 + 1 往復 ≒ single", {"space": 4}),
+    ("・ 比較ランの前に sniff を抜ける対策は実装済み。計測はこれから", {"space": 0, "color": MUTED}),
+], size=14, head="なぜ elapsed は 313 ms なのか")
+code(s, 8.32, 1.22, 4.46, 2.94, [
+    "#47 mode=mpi     elapsed=3683 us",
+    "#49 mode=mpi+omp elapsed=313258 us",
+    ("#50 [omp] last region:", {"bold": True}),
+    ("      primary share=1226 us,", {"bold": True}),
+    ("      extra wait for cp=0 us", {"bold": True}),
+    "#52 mode=single  elapsed=3783 us",
+    "#53 GEMM-CMP ... PASS",
+    ("#54 speedup vs single:", {"bold": True}),
+    ("      mpi=x1.02 mpiomp=x0.01", {"bold": True}),
+    ("      worker_on_cp=3", {"bold": True}),
+], size=12.5, head="Run 16 — Bluetooth 経由で PC が受けたログ")
+panel(s, 8.32, 4.30, 4.46, 2.02, [
+    ("・ worker_on_cp がランごとに +1", {"space": 4}),
+    ("   = 第 2 コアで並列領域が走った回数", {"space": 8, "color": MUTED}),
+    ("・ extra wait for cp = 0 µs", {"space": 4}),
+    ("   = CP のほうが先に終わっている", {"space": 8, "color": MUTED}),
+    ("・ 3 モードとも checksum 厳密一致で PASS", {"space": 0}),
+], size=13.5, head="第 2 コアが動いた証拠")
+rect(s, M, 6.46, CW, 0.58, FILL2, BOX)
+text(s, M, 6.46, CW, 0.58,
+     "計算は 4 コアぶん速くなった。が、その利得を Bluetooth の復帰待ちが丸ごと食った。",
      size=16.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.1)
 
 # ------------------------------------------------------------------ 14
@@ -765,12 +770,12 @@ s = slide("わかったこと / できていないこと",
           note="できていないことを先に自分で言い切ると、質疑が建設的になる。")
 items_ok = [
     ("標準 API のまま実機に載る", "本物の OpenMPI でも自作アダプタでも無改変でビルドでき、結果も一致した"),
-    ("ソースが無くても仕様は確定できる", "逆アセンブルで、ヘッダと食い違う実挙動を根拠付きで確定できた"),
+    ("ノード内 2 コア並列も動いた", "第 2 コア (CP) で並列領域が走り、計算部分は 4 コアぶんの x3.1"),
     ("組み込みの敵は計算ではない", "踏んだ地雷は全部が電源・接続・RTOS・SDK の仕様だった"),
     ("ホストで TDD できる形に切ると強い", "実機で 1 回試す前に 1,788 checks。実機バグもテストに落として直した"),
 ]
 items_ng = [
-    ("ノード内 2 コア並列は未達", "OpenMP は逐次スタブのまま。2 個目のコアは音声処理と取り合いになる"),
+    ("通信待ちを外す対策が未計測", "比較ラン前に sniff を抜ける実装は入ったが、実機での効果はこれから"),
     ("slave 側のログが電波に乗らない", "片方が master のときしか PC に届かない"),
     ("音楽再生との同時実行は未検証", "「使いながら裏で計算」はまだ道半ば"),
     ("N を大きくした時の挙動は未計測", "RAM の上限は N≈128。そこで逆転するかは未検証"),
@@ -796,13 +801,13 @@ text(s, M, 1.22, CW, 0.92, "1 万円のワイヤレスイヤホン 2 個  =  2 �
      size=27, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.1)
 res = [(OK, "✓", "標準 MPI API のベンチが、無改変で耳の中で PASS した"),
        (OK, "✓", "checksum 厳密一致 / 両バッズ size=2 / EXCEPTION 0 回"),
-       (OK, "✓", "5 連タップで再実行、結果は Bluetooth で PC にワイヤレス配信"),
-       (NG, "✗", "速くはならなかった — が、理由は定量的に説明できる")]
+       (OK, "✓", "第 2 コアも動いた — 計算部分だけ見れば 4 コアぶんの x3.1"),
+       (NG, "✗", "全体では速くならなかった — 利得を通信待ちが食った。理由は説明できる")]
 for i, (c, m, t) in enumerate(res):
     ry = 2.44 + i * 0.58
     text(s, M + 0.20, ry, 0.38, 0.46, m, size=19, bold=True, color=c, pad=0.0)
     text(s, M + 0.64, ry + 0.02, CW - 0.9, 0.46, t, size=16.5, pad=0.0)
-nexts = [("① ノード内 2 コア並列", "2 個目のコアを音声処理と\nどう分け合うかが論点"),
+nexts = [("① 通信待ちを外す", "比較ランの前に省電力から\n起こす。実装済み・計測待ち"),
          ("② 通信に耐える問題を選ぶ", "境界だけを交換する問題なら\n通信量が小さい"),
          ("③ 音楽再生との同時実行", "本当に「使いながら裏で計算」\nさせる")]
 tw = (CW - 2 * 0.22) / 3
