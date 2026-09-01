@@ -471,44 +471,21 @@ layers = [
     ("firmware/pinebuds_compute/", "IBRT glue / SPP ログチャネル / 5 連タップ起動の調停", FILL),
     ("OpenPineBuds SDK", "IBRT (TWS 制御) · BESAUD · RTX (CMSIS-RTOS v1)", FILL2),
 ]
-LX, LW = M, 7.55
+LX, LW = M, CW
 for i, (h, b, f) in enumerate(layers):
-    ly = 1.22 + i * 0.84
-    rect(s, LX, ly, LW, 0.76, f, BOX)
-    text(s, LX + 0.10, ly + 0.05, LW - 0.2, 0.32, h, size=13, bold=True, pad=0.02)
-    text(s, LX + 0.10, ly + 0.36, LW - 0.2, 0.36, b, size=10.5, color=MUTED, pad=0.02)
-text(s, LX, 5.48, LW, 0.42,
+    ly = 1.22 + i * 0.86
+    rect(s, LX, ly, LW, 0.78, f, BOX)
+    text(s, LX + 0.12, ly + 0.06, LW - 0.24, 0.34, h, size=14, bold=True, pad=0.02)
+    text(s, LX + 0.12, ly + 0.38, LW - 0.24, 0.36, b, size=11.5, color=MUTED, pad=0.02)
+panel(s, M, 5.58, CW, 1.10, [
+    ("・ -std=gnu++98 / -fno-exceptions / -fno-rtti → C++11 以降が使えない     "
+     "・ ヒープ禁止・STL 禁止・静的バッファのみ", {"space": 4}),
+    ("・ double 禁止 (単精度 FPU のみ、リテラルは 1.0f)     "
+     "・ make check98 で機械的に担保", {"space": 0}),
+], size=12, head="SDK に合わせるしかない制約")
+text(s, M, 6.78, CW, 0.32,
      "規模: adapters 926 行 / firmware 統合 1,656 行 / tests 1,846 行 / 設計ドキュメント 2,643 行",
      size=11.5, color=MUTED, pad=0.02)
-# --- golden reference: one source, three build paths, one checksum
-RX, RW = 8.32, 4.46
-rect(s, RX, 1.22, RW, 2.74, FILL, BOX)
-rect(s, RX, 1.22, RW, 0.42, FILL2, BOX)
-text(s, RX, 1.22, RW, 0.42, "自作アダプタが嘘をついていない証明", size=13.5, bold=True,
-     anchor=MSO_ANCHOR.MIDDLE, pad=0.12)
-rect(s, RX + 0.20, 1.74, RW - 0.40, 0.40, WHITE, BOX)
-text(s, RX + 0.20, 1.74, RW - 0.40, 0.40, "bench/gemm_mpi_omp.cpp  (1 ソース・無改変)",
-     size=11, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.03)
-paths = ["本物の\nOpenMPI\nnp=1", "本物の\nOpenMPI\nnp=2", "自作\nアダプタ\n(逐次)"]
-pw = (RW - 0.40 - 2 * 0.10) / 3
-for i, t in enumerate(paths):
-    px = RX + 0.20 + i * (pw + 0.10)
-    rect(s, px, 2.28, pw, 0.72, WHITE, BOX)
-    text(s, px, 2.28, pw, 0.72, t, size=9.5, anchor=MSO_ANCHOR.MIDDLE,
-         align=PP_ALIGN.CENTER, pad=0.02, space=0)
-rect(s, RX + 0.20, 3.10, RW - 0.40, 0.40, FILL2, BOX)
-text(s, RX + 0.20, 3.10, RW - 0.40, 0.40, "3 経路とも checksum=32768.000000 PASS",
-     size=11.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.03)
-text(s, RX + 0.14, 3.54, RW - 0.28, 0.38,
-     "2 ランクのアダプタ経路はホストの pthread ハーネス (1,788 checks) が担保",
-     size=10, color=MUTED, align=PP_ALIGN.CENTER, pad=0.02)
-panel(s, RX, 4.12, RW, 2.16, [
-    ("・ -std=gnu++98 / -fno-exceptions / -fno-rtti", {"space": 5}),
-    ("   → C++11 以降が使えない", {"space": 7, "color": MUTED, "size": 11}),
-    ("・ ヒープ禁止・STL 禁止・静的バッファのみ", {"space": 5}),
-    ("・ double 禁止 (単精度 FPU のみ)。リテラルは 1.0f", {"space": 5}),
-    ("・ make check98 で機械的に担保", {"space": 0}),
-], size=12, head="SDK に合わせるしかない制約")
 pagenum(s, 6)
 
 # ------------------------------------------------------------------ slide 8
