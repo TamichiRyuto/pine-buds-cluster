@@ -525,7 +525,7 @@ lanes = [
 lw = (CW - 3 * 0.20) / 4
 for i, (icon, name, items) in enumerate(lanes):
     lx = M + i * (lw + 0.20)
-    rect(s, lx, 1.24, lw, 2.55, LANE_FILL[i], BOX)
+    rect(s, lx, 1.24, lw, 2.30, LANE_FILL[i], BOX)
     rect(s, lx, 1.24, lw, 0.56, LANE_HEAD[i], BOX)
     text(s, lx + 0.10, 1.30, 0.48, 0.44, icon, size=20, pad=0.0)
     text(s, lx + 0.62, 1.30, lw - 0.72, 0.44, name, size=12.5, bold=True,
@@ -533,27 +533,45 @@ for i, (icon, name, items) in enumerate(lanes):
     def _jp(t):
         return any("\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff" for c in t)
     body = [(t, {"space": 6, "size": 10, "name": JP if _jp(t) else MONO}) for t in items]
-    text(s, lx + 0.08, 1.88, lw - 0.16, 1.85, body, size=10, pad=0.04)
+    text(s, lx + 0.08, 1.88, lw - 0.16, 1.62, body, size=10, pad=0.04)
 
-rect(s, M, 4.02, CW, 2.06, FILL, BOX)
-rect(s, M, 4.02, CW, 0.44, FILL2, BOX)
-text(s, M, 4.02, CW, 0.44, "1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない", size=13.5,
+# --- Claude Code sits across all four, not beside them
+CC_FILL, CC_HEAD = RGBColor(0xF3, 0xEF, 0xF9), RGBColor(0xE3, 0xDC, 0xF2)
+rect(s, M, 3.66, CW, 1.06, CC_FILL, BOX)
+rect(s, M, 3.66, CW, 0.42, CC_HEAD, BOX)
+text(s, M + 0.10, 3.68, 0.46, 0.38, "🤖", size=17, pad=0.0)
+text(s, M + 0.58, 3.66, 6.0, 0.42, "Claude Code — 4 つの世界を横断して回す", size=13,
+     bold=True, anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
+text(s, W - M - 5.2, 3.66, 5.2, 0.42, "103 コミット中 102 が Co-Authored-By: Claude",
+     size=10.5, color=MUTED, align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE, pad=0.10)
+cc = [("設計・SDK 調査", "プリビルト .a の逆アセンブルと nm でのシンボル解決"),
+      ("TDD の運用", "Red のテストは本体、Green の実装はサブエージェントへ"),
+      ("実機ランの監視", "UART / SPP を監視し、結果を設計ドキュメントに反映")]
+ccw = (CW - 0.40 - 2 * 0.20) / 3
+for i, (h, b) in enumerate(cc):
+    cx = M + 0.20 + i * (ccw + 0.20)
+    text(s, cx, 4.14, ccw, 0.26, "・ " + h, size=10.5, bold=True, pad=0.0)
+    text(s, cx + 0.16, 4.40, ccw - 0.16, 0.28, b, size=9.5, color=MUTED, pad=0.0)
+
+rect(s, M, 4.88, CW, 1.70, FILL, BOX)
+rect(s, M, 4.88, CW, 0.42, FILL2, BOX)
+text(s, M, 4.88, CW, 0.42, "1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない", size=13,
      bold=True, anchor=MSO_ANCHOR.MIDDLE, pad=0.12)
 chips = ["① 書く", "② ホストで緑", "③ SDK に配置", "④ ビルド", "⑤ 焼く", "⑥ 耳で観る"]
 cw_ = (CW - 0.60 - 5 * 0.30) / 6
 for i, c in enumerate(chips):
     cx = M + 0.30 + i * (cw_ + 0.30)
-    rect(s, cx, 4.66, cw_, 0.74, WHITE, BOX)
-    text(s, cx, 4.66, cw_, 0.74, c, size=13, bold=True, anchor=MSO_ANCHOR.MIDDLE,
+    rect(s, cx, 5.42, cw_, 0.62, WHITE, BOX)
+    text(s, cx, 5.42, cw_, 0.62, c, size=12.5, bold=True, anchor=MSO_ANCHOR.MIDDLE,
          align=PP_ALIGN.CENTER, pad=0.02)
     if i < 5:
-        arrow(s, cx + cw_ + 0.02, 4.88, 0.26, 0.30, MSO_SHAPE.RIGHT_ARROW)
-text(s, M, 5.56, CW, 0.36,
+        arrow(s, cx + cw_ + 0.02, 5.58, 0.26, 0.30, MSO_SHAPE.RIGHT_ARROW)
+text(s, M, 6.14, CW, 0.34,
      "⑥ で見つけた不具合は ① に戻る。② が緑にならないうちは ④ に進まない — 焼いてから気づくと左右 2 個ぶんやり直し",
      size=11, color=MUTED, align=PP_ALIGN.CENTER, pad=0.0)
-text(s, M, 6.30, CW, 0.40,
+text(s, M, 6.66, CW, 0.38,
      "WSL の中の Docker の中の GCC でビルドして、Windows の Python で結果を受ける",
-     size=14, bold=True, align=PP_ALIGN.CENTER, pad=0.0)
+     size=13.5, bold=True, align=PP_ALIGN.CENTER, pad=0.0)
 
 s = slide("実装の山場 ① — SDK にソースが無い",
           note="「ヘッダを信じるな、リンクされるバイナリを信じろ」。ここは技術者ウケが良いはず。")

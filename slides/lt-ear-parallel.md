@@ -204,6 +204,13 @@ rank 0 → 行 0..15 を計算    rank 1 → 行 16..31 を計算
 | 🪟 | **Windows 11** | `usbipd attach --wsl` で充電ケースを WSL に渡す → `/dev/ttyACM0` (右) / `ttyACM1` (左) / `spp_tail.py COM6` で Bluetooth SPP ログを受信 |
 | 🎧 | **PineBuds Pro (実機)** | `bestool write-image` を左右 2 個に / 「出して 3 秒待って戻す」= リブート (書き込みトリガ) / `picocom -b 2000000 /dev/ttyACM0` / 5 連タップで再実行 |
 
+**🤖 Claude Code — 4 つの世界を横断して回す** (103 コミット中 102 が `Co-Authored-By: Claude`)
+
+- **設計・SDK 調査**: プリビルト `.a` の逆アセンブルと `nm` でのシンボル解決
+- **TDD の運用**: Red のテストは本体セッション、Green の実装はサブエージェントへ委譲
+  (`CLAUDE.md` にルールを明文化してある)
+- **実機ランの監視**: UART / SPP を監視し、結果を設計ドキュメントに反映
+
 **1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない**
 
 ```
