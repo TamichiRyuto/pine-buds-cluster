@@ -17,6 +17,8 @@
 //            "[mpi] peer ok"), periodically re-assert
 //            BTIF_BAM_CONNECTABLE_ONLY so a PC can reconnect without
 //            touching the in-case TWS bring-up sequence (§13.4.3 case C).
+//            SPP_LOG_ACCESS_MODE (below) widens it to GENERAL_ACCESSIBLE
+//            for a one-off pairing build (§13.7 step 0).
 //
 // §13.1.5: uses btif_spp_*/btif_sdp_* directly, never app_spp_send_data()
 // (leaks umm_malloc, §13.1.1-3) or app_rfcomm_mgr.cpp (hardcodes a 128-bit
@@ -42,6 +44,17 @@
 #include "app_tws_ibrt.h"  // ibrt_ctrl_t, app_tws_ibrt_get_bt_ctrl_ctx, app_tws_ibrt_set_access_mode
 #include "me_api.h"        // BTIF_BAM_CONNECTABLE_ONLY, BTIF_COD_MAJOR_PERIPHERAL
 #include "cmsis_os.h"
+
+// §13.4.3 / §13.7 step 0: the access mode the re-arm keeps asserting once
+// MPI hands off. Default is page scan only (an existing bond reconnects).
+// A fresh Windows pairing needs inquiry scan too: build once with
+// `make ... SPP_LOG_PAIRING=1` (scripts/install-into-sdk.sh maps that to
+// -DSPP_LOG_ACCESS_MODE=BTIF_BAM_GENERAL_ACCESSIBLE), pair, then rebuild
+// without it. Never leave GENERAL_ACCESSIBLE in a normal build: it is the
+// only way a stranger can page/inquire the bud while docked.
+#ifndef SPP_LOG_ACCESS_MODE
+#define SPP_LOG_ACCESS_MODE BTIF_BAM_CONNECTABLE_ONLY
+#endif
 
 namespace {
 
@@ -144,8 +157,8 @@ void spp_log_rearm_access_mode(void) {
     if (c->access_mode_sending) {
         return;
     }
-    if (c->access_mode != BTIF_BAM_CONNECTABLE_ONLY) {
-        app_tws_ibrt_set_access_mode(BTIF_BAM_CONNECTABLE_ONLY);
+    if (c->access_mode != SPP_LOG_ACCESS_MODE) {
+        app_tws_ibrt_set_access_mode(SPP_LOG_ACCESS_MODE);
     }
 }
 

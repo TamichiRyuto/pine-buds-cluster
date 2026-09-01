@@ -44,6 +44,10 @@
 #      FULLCHARGE indication is kept; only the shutdown is guarded out with
 #      the same `if (0 && ...)` style as steps 6 and 8. Hardware charge
 #      termination is unaffected (the PMU charger cuts off on its own)
+#  11. Adds an opt-in to apps/main/Makefile: `make ... SPP_LOG_PAIRING=1`
+#      defines SPP_LOG_ACCESS_MODE=BTIF_BAM_GENERAL_ACCESSIBLE so the SPP
+#      log re-arm (§13.4.3) also turns inquiry scan on, letting Windows
+#      discover the buds for a fresh pairing (§13.7 step 0). Off by default
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -56,6 +60,7 @@ BESMAIN_CPP="${SDK_DIR}/services/bt_app/besmain.cpp"
 BATTERY_CPP="${SDK_DIR}/apps/battery/app_battery.cpp"
 MARKER="pine-buds-cluster compute hook"
 FULL_CHARGE_MARKER="pine-buds-cluster full-charge keep-alive"
+PAIRING_MARKER="pine-buds-cluster SPP pairing build"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
@@ -98,6 +103,16 @@ if ! grep -q "${MPI_MARKER}" "${DST}/Makefile"; then
     echo "[ok] -Iapps/main -DGEMM_BENCH_NO_MAIN added to apps/main/Makefile"
 else
     echo "[ok] apps/main/Makefile already has the MPI/IBRT build flags"
+fi
+
+if ! grep -q "${PAIRING_MARKER}" "${DST}/Makefile"; then
+    # Command-line make variables reach sub-makes through MAKEFLAGS, so
+    # `make T=open_source ... SPP_LOG_PAIRING=1` is visible here.
+    printf '\n# %s (docs/design-ibrt-transport.md §13.7 step 0)\nifeq ($(SPP_LOG_PAIRING),1)\nccflags-y += -DSPP_LOG_ACCESS_MODE=BTIF_BAM_GENERAL_ACCESSIBLE\nendif\n' \
+        "${PAIRING_MARKER}" >> "${DST}/Makefile"
+    echo "[ok] SPP_LOG_PAIRING=1 opt-in added to apps/main/Makefile"
+else
+    echo "[ok] apps/main/Makefile already has the SPP pairing opt-in"
 fi
 
 if grep -q "${MARKER}" "${APPS_CPP}"; then
@@ -270,3 +285,4 @@ fi
 echo
 echo "Now build inside the dev container:"
 echo "  cd external/OpenPineBuds && ./start_dev.sh   # then: ./build.sh"
+echo "For a one-off Windows pairing build add SPP_LOG_PAIRING=1 to make (step 11)."
