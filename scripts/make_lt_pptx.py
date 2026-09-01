@@ -475,7 +475,9 @@ LANE_HEAD = [RGBColor(0xD6, 0xE6, 0xF3), RGBColor(0xCF, 0xE8, 0xEA),
              RGBColor(0xE1, 0xDC, 0xF1), RGBColor(0xF2, 0xE6, 0xCF)]
 s = slide("開発環境 — 1 回の実験に必要なもの",
           note="4 つの世界をまたがないと 1 回も試せない、という絵。"
-               "「WSL の中の Docker の中の GCC で焼いて、Windows の Python で受ける」で笑いが取れる。")
+               "「WSL の中の Docker の中の GCC で焼いて、Windows の Python で受ける」で笑いが取れる。"
+               "② が緑にならないうちは ④ に進まない — 焼いてから気づくと左右 2 個ぶんやり直し、は口頭で。"
+               "$480 はセッションログのトークン数 × 公開単価の換算値で、実際の請求額ではない。")
 lanes = [
     ("🐧", "WSL2  Ubuntu", ["コードを書くのは全部ここ",
                             "make test → 1,788 checks",
@@ -493,7 +495,7 @@ lanes = [
 lw = (CW - 3 * 0.20) / 4
 for i, (icon, name, items) in enumerate(lanes):
     lx = M + i * (lw + 0.20)
-    rect(s, lx, 1.24, lw, 2.14, LANE_FILL[i], BOX)
+    rect(s, lx, 1.24, lw, 2.02, LANE_FILL[i], BOX)
     rect(s, lx, 1.24, lw, 0.60, LANE_HEAD[i], BOX)
     text(s, lx + 0.10, 1.30, 0.52, 0.48, icon, size=22, pad=0.0)
     text(s, lx + 0.66, 1.24, lw - 0.76, 0.60, name, size=15, bold=True,
@@ -502,42 +504,45 @@ for i, (icon, name, items) in enumerate(lanes):
     def _jp(t):
         return any("぀" <= c <= "ヿ" or "一" <= c <= "鿿" for c in t)
     body = [(t, {"space": 9, "size": 12, "name": JP if _jp(t) else MONO}) for t in items]
-    text(s, lx + 0.08, 1.92, lw - 0.16, 1.40, body, size=12, pad=0.05)
+    text(s, lx + 0.08, 1.92, lw - 0.16, 1.28, body, size=12, pad=0.05)
 
 CC_FILL, CC_HEAD = RGBColor(0xF3, 0xEF, 0xF9), RGBColor(0xE3, 0xDC, 0xF2)
-rect(s, M, 3.54, CW, 1.10, CC_FILL, BOX)
-rect(s, M, 3.54, CW, 0.48, CC_HEAD, BOX)
-text(s, M + 0.10, 3.56, 0.50, 0.44, "🤖", size=19, pad=0.0)
-text(s, M + 0.64, 3.54, 6.4, 0.48, "Claude Code — 4 つの世界を横断して回す", size=15,
+rect(s, M, 3.40, CW, 1.84, CC_FILL, BOX)
+rect(s, M, 3.40, CW, 0.48, CC_HEAD, BOX)
+text(s, M + 0.10, 3.42, 0.50, 0.44, "🤖", size=19, pad=0.0)
+text(s, M + 0.64, 3.40, 8.0, 0.48, "Claude Code — 4 つの世界を横断して回す", size=15,
      bold=True, anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
-text(s, W - M - 5.4, 3.54, 5.4, 0.48, "103 コミット中 102 が Co-Authored-By: Claude",
-     size=12, color=MUTED, align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE, pad=0.12)
 cc = [("設計・SDK 調査", "プリビルト .a の逆アセンブルと nm"),
       ("TDD の運用", "Red は本体、Green はサブエージェント"),
       ("実機ランの監視", "UART / SPP を監視して docs に反映")]
 ccw = (CW - 0.40 - 2 * 0.20) / 3
 for i, (h, b) in enumerate(cc):
     cx = M + 0.20 + i * (ccw + 0.20)
-    text(s, cx, 4.06, ccw, 0.28, "・ " + h, size=13, bold=True, pad=0.0)
-    text(s, cx + 0.20, 4.32, ccw - 0.20, 0.28, b, size=12, color=MUTED, pad=0.0)
+    text(s, cx, 3.94, ccw, 0.28, "・ " + h, size=13, bold=True, pad=0.0)
+    text(s, cx + 0.20, 4.18, ccw - 0.20, 0.28, b, size=12, color=MUTED, pad=0.0)
+stats = [("14 時間", "実作業時間 (ログのイベント間隔から集計)"),
+         ("$480", "API 料金換算。83% がプロンプトキャッシュ"),
+         ("103 コミット", "うち 102 が Co-Authored-By: Claude")]
+for i, (big, cap) in enumerate(stats):
+    cx = M + 0.20 + i * (ccw + 0.20)
+    rect(s, cx, 4.52, ccw, 0.62, WHITE, BOX)
+    text(s, cx, 4.54, ccw, 0.34, big, size=17, bold=True, align=PP_ALIGN.CENTER, pad=0.02)
+    text(s, cx, 4.86, ccw, 0.26, cap, size=10.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.02)
 
-rect(s, M, 4.80, CW, 1.62, FILL, BOX)
-rect(s, M, 4.80, CW, 0.48, FILL2, BOX)
-text(s, M, 4.80, CW, 0.48, "1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない", size=15,
+rect(s, M, 5.40, CW, 1.16, FILL, BOX)
+rect(s, M, 5.40, CW, 0.42, FILL2, BOX)
+text(s, M, 5.40, CW, 0.42, "1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない", size=14.5,
      bold=True, anchor=MSO_ANCHOR.MIDDLE, pad=0.14)
 chips = ["① 書く", "② ホストで緑", "③ SDK に配置", "④ ビルド", "⑤ 焼く", "⑥ 耳で観る"]
 cw_ = (CW - 0.60 - 5 * 0.28) / 6
 for i, c in enumerate(chips):
     cx = M + 0.30 + i * (cw_ + 0.28)
-    rect(s, cx, 5.38, cw_, 0.60, WHITE, BOX)
-    text(s, cx, 5.38, cw_, 0.60, c, size=13.5, bold=True, anchor=MSO_ANCHOR.MIDDLE,
+    rect(s, cx, 5.90, cw_, 0.54, WHITE, BOX)
+    text(s, cx, 5.90, cw_, 0.54, c, size=13, bold=True, anchor=MSO_ANCHOR.MIDDLE,
          align=PP_ALIGN.CENTER, pad=0.02)
     if i < 5:
-        arrow(s, cx + cw_ + 0.01, 5.53, 0.26, 0.30, MSO_SHAPE.RIGHT_ARROW)
-text(s, M, 6.04, CW, 0.34,
-     "② が緑にならないうちは ④ に進まない — 焼いてから気づくと左右 2 個ぶんやり直し",
-     size=13, color=MUTED, align=PP_ALIGN.CENTER, pad=0.0)
-text(s, M, 6.56, CW, 0.40,
+        arrow(s, cx + cw_ + 0.01, 6.02, 0.26, 0.30, MSO_SHAPE.RIGHT_ARROW)
+text(s, M, 6.66, CW, 0.38,
      "WSL の中の Docker の中の GCC でビルドして、Windows の Python で結果を受ける",
      size=15, bold=True, align=PP_ALIGN.CENTER, pad=0.0)
 
