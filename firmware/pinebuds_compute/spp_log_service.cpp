@@ -122,6 +122,7 @@ osMutexId s_ring_mid;
 osThreadId s_log_tid;
 unsigned s_seq;
 unsigned s_contended; /* try-lock failures, statistics only */
+unsigned s_timeouts_seen; /* last spp_tx_fsm.timeouts value we already traced */
 
 // §13.3.4 send state machine (host-tested in tests/test_spp_tx_fsm.cpp).
 enum { kSppLogChunk = 512 }; /* < L2CAP_MTU 672, app_spp.h:29 */
@@ -169,8 +170,11 @@ void spp_log_callback(struct spp_device *dev, struct spp_callback_parms *info) {
     (void)dev;
     switch (info->event) {
     case BTIF_SPP_EVENT_REMDEV_CONNECTED:
-        spp_tx_fsm_on_connected(&s_fsm);
-        TRACE(0, "[spplog] connected");
+        if (spp_tx_fsm_on_connected(&s_fsm)) {
+            TRACE(0, "[spplog] connected");
+        } else {
+            TRACE(1, "[spplog] connected (dup %u ignored)", s_fsm.dup_connected);
+        }
         break;
     case BTIF_SPP_EVENT_REMDEV_DISCONNECTED:
         spp_tx_fsm_on_disconnected(&s_fsm);
@@ -202,6 +206,10 @@ void spp_log_thread(void const *argument) {
         unsigned commit_base;
         unsigned commit_n = spp_tx_fsm_reap(&s_fsm, &commit_base, now_ms);
         if (commit_n) log_ring_commit(&s_ring, commit_base, commit_n);
+        if (s_fsm.timeouts != s_timeouts_seen) {
+            TRACE(1, "[spplog] tx timeout, resending (%u)", s_fsm.timeouts);
+            s_timeouts_seen = s_fsm.timeouts;
+        }
         if (!spp_tx_fsm_ready(&s_fsm)) continue;
 
         unsigned dropped = log_ring_take_dropped(&s_ring);

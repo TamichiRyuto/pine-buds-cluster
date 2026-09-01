@@ -10,17 +10,25 @@ void spp_tx_fsm_init(struct spp_tx_fsm *f) {
     f->inflight_base = 0;
     f->inflight_len = 0;
     f->sent_at_ms = 0;
+    f->dup_connected = 0;
+    f->timeouts = 0;
 }
 
 int spp_tx_fsm_on_connected(struct spp_tx_fsm *f) {
+    if (f->connected) {
+        f->dup_connected++;
+        return 0;
+    }
     f->connected = 1;
     f->inflight = 0;
+    f->done_len = 0;
     return 1;
 }
 
 void spp_tx_fsm_on_disconnected(struct spp_tx_fsm *f) {
     f->connected = 0;
     f->inflight = 0;
+    f->done_len = 0;
 }
 
 void spp_tx_fsm_on_data_sent(struct spp_tx_fsm *f, unsigned len) {
@@ -29,8 +37,12 @@ void spp_tx_fsm_on_data_sent(struct spp_tx_fsm *f, unsigned len) {
 }
 
 unsigned spp_tx_fsm_reap(struct spp_tx_fsm *f, unsigned *base_out, unsigned now_ms) {
-    (void)now_ms;
     if (f->inflight) {
+        if ((now_ms - f->sent_at_ms) >= (unsigned)SPP_TX_FSM_TIMEOUT_MS) {
+            f->inflight = 0;
+            f->inflight_len = 0;
+            f->timeouts++;
+        }
         return 0;
     }
     if (f->inflight_len != 0) {

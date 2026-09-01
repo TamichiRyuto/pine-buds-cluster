@@ -13,8 +13,19 @@
 // the rest -- no lock is needed, same as the s_connected/s_inflight/
 // s_done_len statics this replaces. Call the log-thread side once per
 // wake-up in this order: reap, ready, sending/send_failed.
+//
+// The SDK delivers REMDEV_CONNECTED twice per RFCOMM open
+// (SPPNEW_EVENT_NEW_OPEN, then SPPNEW_EVENT_OPEN a few ms later): a second
+// CONNECTED while a chunk is in flight is ignored (dup_connected counts it,
+// the send stays in flight until DATA_SENT reaps it), and DISCONNECTED
+// discards any in-flight chunk uncommitted so it is re-peeked from the ring
+// after the reconnect (at-least-once). A send left unacknowledged for
+// SPP_TX_FSM_TIMEOUT_MS is given up without commit (timeouts++) so a stale
+// DLC whose DATA_SENT never arrives cannot wedge the channel.
 #ifndef PINEBUDS_COMPUTE_SPP_TX_FSM_H
 #define PINEBUDS_COMPUTE_SPP_TX_FSM_H
+
+enum { SPP_TX_FSM_TIMEOUT_MS = 5000 };
 
 struct spp_tx_fsm {
     volatile int connected;      /* RFCOMM link up (set/cleared on BesbtThread) */
@@ -22,7 +33,9 @@ struct spp_tx_fsm {
     volatile unsigned done_len;  /* tx_data_length of the last DATA_SENT (BesbtThread writes, log thread reads) */
     unsigned inflight_base;      /* ring position of the in-flight chunk */
     unsigned inflight_len;       /* ring bytes in the in-flight chunk; 0 = marker chunk or nothing */
-    unsigned sent_at_ms;         /* now_ms passed to spp_tx_fsm_sending (reserved for an in-flight timeout) */
+    unsigned sent_at_ms;         /* now_ms passed to spp_tx_fsm_sending, used for the in-flight timeout */
+    unsigned dup_connected;      /* CONNECTED events ignored because already connected (statistics) */
+    unsigned timeouts;           /* sends given up after SPP_TX_FSM_TIMEOUT_MS (statistics) */
 };
 
 void spp_tx_fsm_init(struct spp_tx_fsm *f);
