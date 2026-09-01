@@ -191,14 +191,14 @@ GEMM-MPI mode=mpi+omp N=32 rank=0 size=2 threads=2 checksum=... PASS
 GEMM-MPI mode=mpi+omp elapsed=313258 us frames tx=1 rx=2 err=0
 [omp] last region (mpi+omp): primary share=1226 us, extra wait for cp=0 us   ← 並列領域そのものの時間
 GEMM-MPI mode=omp N=32 rank=0 size=1 threads=2 checksum=... PASS
-GEMM-MPI mode=omp elapsed=NNNN us frames tx=0 rx=0 err=0
-[omp] last region (omp): primary share=NNNN us, extra wait for cp=0 us
+GEMM-MPI mode=omp elapsed=2553 us frames tx=0 rx=0 err=0
+[omp] last region (omp): primary share=2376 us, extra wait for cp=0 us
 GEMM-MPI mode=single N=32 rank=0 size=1 threads=1 checksum=... PASS
-GEMM-MPI mode=single elapsed=3783 us frames tx=0 rx=0 err=0
-GEMM-CMP N=32 rank=0 size=2 threads=2 single=3783 us mpi=3683 us mpiomp=313258 us omp=NNNN us PASS
-GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 omp=xN.NN worker_on_cp=6
+GEMM-MPI mode=single elapsed=3762 us frames tx=0 rx=0 err=0
+GEMM-CMP N=32 rank=0 size=2 threads=2 single=3762 us mpi=3664 us mpiomp=125733 us omp=2553 us PASS
+GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.02 omp=x1.47 worker_on_cp=6
 ```
-(2026-09-01 Run 16 タップ #2 の実測値。`omp` 行は Run 17 で追加、`NNNN` は未計測。design doc §15.6)
+(2026-09-01 Run 17 タップ #2 右の実測値。design doc §15.8)
 
 - `speedup` = single の elapsed ÷ そのモードの elapsed。1.00 未満は「1 バッズ 1 コアより遅い」
   (MPI の Allreduce が TWS リンクを往復する分が上乗せされる)
@@ -217,6 +217,10 @@ GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 omp=xN.NN worker_on_cp
 - `[mpi] tws sniff exit` は size=2 のときだけ出る。`was=0` はリンクが既に active だった (待ち 0 ms)、
   `TIMEOUT` は 1 s 待っても active に戻らなかった — その場合 `mpi` / `mpi+omp` の elapsed は
   Run 16 と同じく数百 ms に戻る (design doc §15.7)
+- **2 コアの速度向上率は `omp=` の値で読む** (design doc §15.8)。`mpi` / `mpi+omp` の elapsed は
+  集団通信の谷間でリンクが sniff に再突入するため、sniff 外しを入れても数百 ms に振れる
+  (Run 17 実測: omp は x1.47〜1.51 で安定、mpi+omp は x0.02 のまま)。リンクを使わない `omp`
+  (1 バッズ 2 コア) だけが 2 コア並列の実力をぶれずに示す
 
 ## 5. UART の見方
 
