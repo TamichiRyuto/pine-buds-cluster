@@ -12,7 +12,9 @@
 //            "[spplog] init chan=19 setup=0 open=1" (see spp_log_service_init).
 //   - §13.3  The tap (compute_log_tap, called from COMPUTE_TRACE) and the
 //            send thread that drains firmware/pinebuds_compute/log_ring
-//            over btif_spp_write, driven by DATA_SENT.
+//            over btif_spp_write, driven by DATA_SENT. The send state
+//            machine (§13.3.4) lives in spp_tx_fsm, host-tested in
+//            tests/test_spp_tx_fsm.cpp.
 //   - §13.4  Access-mode re-arm: once MPI hands off (mpi_ibrt_glue.cpp,
 //            "[mpi] peer ok"), periodically re-assert
 //            BTIF_BAM_CONNECTABLE_ONLY so a PC can reconnect without
@@ -32,6 +34,7 @@
 
 #include "compute_trace.h"  // TRACE (via hal_trace.h, pulled in under PINEBUDS_TARGET)
 #include "log_ring.h"
+#include "spp_tx_fsm.h"
 
 #include <stdarg.h>
 #include <stdio.h>
@@ -44,6 +47,7 @@
 #include "app_tws_ibrt.h"  // ibrt_ctrl_t, app_tws_ibrt_get_bt_ctrl_ctx, app_tws_ibrt_set_access_mode
 #include "me_api.h"        // BTIF_BAM_CONNECTABLE_ONLY, BTIF_COD_MAJOR_PERIPHERAL
 #include "cmsis_os.h"
+#include "hal_timer.h"     // GET_CURRENT_MS()
 
 // §13.4.3 / §13.7 step 0: the access mode the re-arm keeps asserting once
 // MPI hands off. Default is page scan only (an existing bond reconnects).
@@ -119,14 +123,10 @@ osThreadId s_log_tid;
 unsigned s_seq;
 unsigned s_contended; /* try-lock failures, statistics only */
 
-// §13.3.4 send state machine.
+// §13.3.4 send state machine (host-tested in tests/test_spp_tx_fsm.cpp).
 enum { kSppLogChunk = 512 }; /* < L2CAP_MTU 672, app_spp.h:29 */
 char s_tx_slot[kSppLogChunk];
-volatile int s_connected;
-volatile int s_inflight;
-volatile unsigned s_done_len; /* written on BesbtThread, read on log thread */
-unsigned s_inflight_base;
-unsigned s_inflight_len;
+struct spp_tx_fsm s_fsm;
 
 // §13.4.3 access-mode re-arm state.
 int s_scan_forced;
@@ -169,19 +169,16 @@ void spp_log_callback(struct spp_device *dev, struct spp_callback_parms *info) {
     (void)dev;
     switch (info->event) {
     case BTIF_SPP_EVENT_REMDEV_CONNECTED:
-        s_connected = 1;
-        s_inflight = 0;
+        spp_tx_fsm_on_connected(&s_fsm);
         TRACE(0, "[spplog] connected");
         break;
     case BTIF_SPP_EVENT_REMDEV_DISCONNECTED:
-        s_connected = 0;
-        s_inflight = 0;
+        spp_tx_fsm_on_disconnected(&s_fsm);
         TRACE(0, "[spplog] disconnected");
         break;
     case BTIF_SPP_EVENT_DATA_SENT: {
         struct spp_tx_done *d = (struct spp_tx_done *)info->p.other;
-        s_done_len = d->tx_data_length;
-        s_inflight = 0;
+        spp_tx_fsm_on_data_sent(&s_fsm, d->tx_data_length);
         break;
     }
     default:
@@ -201,48 +198,37 @@ void spp_log_thread(void const *argument) {
         osSignalWait(0x1, 200); /* 200 ms also drives the access-mode re-arm */
         spp_log_rearm_access_mode();
 
-        if (s_inflight) {
-            continue;
-        }
-        if (s_inflight_len) {
-            /* Previous send confirmed (or short-written); advance the ring
-               no further than the stack actually reported. */
-            unsigned n = (s_done_len < s_inflight_len) ? s_done_len : s_inflight_len;
-            log_ring_commit(&s_ring, s_inflight_base, n);
-            s_inflight_len = 0;
-        }
-        if (!s_connected) {
-            continue;
-        }
+        unsigned now_ms = (unsigned)GET_CURRENT_MS();
+        unsigned commit_base;
+        unsigned commit_n = spp_tx_fsm_reap(&s_fsm, &commit_base, now_ms);
+        if (commit_n) log_ring_commit(&s_ring, commit_base, commit_n);
+        if (!spp_tx_fsm_ready(&s_fsm)) continue;
 
         unsigned dropped = log_ring_take_dropped(&s_ring);
         unsigned n;
+        unsigned base;
         int consumes_ring;
 
         if (dropped != 0) {
             /* Marker chunk: does not touch the ring, no mutex needed. */
             n = log_ring_next_chunk(&s_ring, dropped, s_contended, s_tx_slot,
-                                    sizeof(s_tx_slot), &s_inflight_base,
+                                    sizeof(s_tx_slot), &base,
                                     &consumes_ring);
         } else {
             osMutexWait(s_ring_mid, osWaitForever); /* only the log thread waits */
             n = log_ring_next_chunk(&s_ring, 0, s_contended, s_tx_slot,
-                                    sizeof(s_tx_slot), &s_inflight_base,
+                                    sizeof(s_tx_slot), &base,
                                     &consumes_ring);
             osMutexRelease(s_ring_mid);
         }
-        s_inflight_len = consumes_ring ? n : 0;
 
         if (n == 0) {
             continue;
         }
 
         uint16_t len = (uint16_t)n;
-        s_inflight = 1;
-        if (btif_spp_write(s_dev, s_tx_slot, &len) != BT_STS_SUCCESS) {
-            s_inflight = 0; /* retry next cycle */
-            s_inflight_len = 0;
-        }
+        spp_tx_fsm_sending(&s_fsm, base, consumes_ring ? n : 0u, now_ms);
+        if (btif_spp_write(s_dev, s_tx_slot, &len) != BT_STS_SUCCESS) spp_tx_fsm_send_failed(&s_fsm);
     }
 }
 
@@ -292,6 +278,7 @@ extern "C" void spp_log_enable_connectable(void) { s_scan_forced = 1; }
 // (services/bt_app/besmain.cpp, installed by scripts/install-into-sdk.sh).
 extern "C" void spp_log_service_init(void) {
     log_ring_init(&s_ring);
+    spp_tx_fsm_init(&s_fsm);
     s_ring_mid = osMutexCreate(osMutex(spp_log_ring_mutex));
     s_log_tid = osThreadCreate(osThread(spp_log_thread), NULL);
 

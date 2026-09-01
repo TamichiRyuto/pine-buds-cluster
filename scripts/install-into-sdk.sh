@@ -32,8 +32,9 @@
 #      stays owned solely by the MPI glue's forced OUT_BOX (§11.2.3). Same
 #      one-line `if (0 && ...)` guard style as step 6
 #      (docs/design-ibrt-transport.md §12.8)
-#   9. Copies the SPP log ring + service (log_ring.{h,cpp}, spp_log_service.{h,cpp})
-#      flat into apps/main/ alongside the rest (same as step 4), and patches
+#   9. Copies the SPP log ring + service (log_ring.{h,cpp}, spp_log_service.{h,cpp},
+#      spp_tx_fsm.{h,cpp} for the send state machine) flat into apps/main/
+#      alongside the rest (same as step 4), and patches
 #      services/bt_app/besmain.cpp to call spp_log_service_init() on
 #      BesbtThread, just before the event loop -- the same spot the SDK's
 #      own app_tota_init() runs from (docs/design-ibrt-transport.md §13.8)
@@ -95,6 +96,8 @@ cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/spp_log_service.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/run_trigger.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/run_trigger.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/spp_tx_fsm.h \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/spp_tx_fsm.cpp \
    "${DST}/"
 echo "[ok] MPI/OpenMP adapters + bench + IBRT glue + SPP log service copied into apps/main/"
 

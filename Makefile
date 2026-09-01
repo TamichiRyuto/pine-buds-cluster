@@ -18,6 +18,8 @@ RINGBIN  := $(BUILDDIR)/test_log_ring
 RINGSRC  := firmware/pinebuds_compute/log_ring.cpp
 TRIGBIN  := $(BUILDDIR)/test_run_trigger
 TRIGSRC  := firmware/pinebuds_compute/run_trigger.cpp
+FSMBIN   := $(BUILDDIR)/test_spp_tx_fsm
+FSMSRC   := firmware/pinebuds_compute/spp_tx_fsm.cpp
 
 # The benchmark source keeps its omp pragmas even in non-OpenMP builds.
 BENCH_WNO := -Wno-unknown-pragmas
@@ -32,11 +34,11 @@ TARGET_DIALECT := -std=gnu++98 -Wall -Wextra -Werror -Wdouble-promotion \
 
 check98:
 	@mkdir -p $(BUILDDIR)/check98
-	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp $(RINGSRC) $(TRIGSRC)
+	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp $(RINGSRC) $(TRIGSRC) $(FSMSRC)
 	@mv *.o $(BUILDDIR)/check98/
 	@echo "gnu++98 target-dialect check OK"
 
-test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) $(TRIGBIN) check98
+test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) $(TRIGBIN) $(FSMBIN) check98
 	./$(TESTBIN)
 	./$(MPIBIN)
 	./$(OMPBIN)
@@ -44,6 +46,7 @@ test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) $(TRIGBIN
 	./$(FRAGBIN)
 	./$(RINGBIN)
 	./$(TRIGBIN)
+	./$(FSMBIN)
 
 $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
@@ -73,6 +76,10 @@ $(RINGBIN): tests/test_log_ring.cpp $(RINGSRC) firmware/pinebuds_compute/log_rin
 $(TRIGBIN): tests/test_run_trigger.cpp $(TRIGSRC) firmware/pinebuds_compute/run_trigger.h tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Ifirmware/pinebuds_compute -Itests tests/test_run_trigger.cpp $(TRIGSRC) -o $@
+
+$(FSMBIN): tests/test_spp_tx_fsm.cpp $(FSMSRC) firmware/pinebuds_compute/spp_tx_fsm.h tests/test_framework.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -Ifirmware/pinebuds_compute -Itests tests/test_spp_tx_fsm.cpp $(FSMSRC) -o $@
 
 clean:
 	rm -rf $(BUILDDIR)
