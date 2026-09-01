@@ -167,16 +167,17 @@ scripts/spp_latency/com_kill.sh
 `+0.019 s` 〜 `+0.084 s` のようにミリ秒台で出る行がライブ配信、`+6 s` 前後の行は開く前に
 リングに溜まっていた分。2026-09-01 の実測は n=8 で min 19 / avg 40 / max 84 ms。
 
-### 4d. 3 モード比較ラン — MPI+OpenMP / MPI 単体 / シングルの速度向上率 (design doc §15)
+### 4d. 4 モード比較ラン — MPI+OpenMP / MPI 単体 / OpenMP 単体 / シングルの速度向上率 (design doc §15)
 
-起動時ランと 5 連タップのランは、同じ N=32 の GEMM ベンチを 3 通りの構成で連続して走らせる
-(順序は mpi → mpi+omp → single)。各バッズが自分の結果を出すので、COM6 に master 側しか
+起動時ランと 5 連タップのランは、同じ N=32 の GEMM ベンチを 4 通りの構成で連続して走らせる
+(順序は mpi → mpi+omp → omp → single)。各バッズが自分の結果を出すので、COM6 に master 側しか
 出なくても比較行は必ず読める。
 
 | mode | バッズ | コア | 意味 |
 |---|---|---|---|
 | `mpi` | 2 (size=2) | 1 | 従来の GEMM-MPI。行を左右で半分ずつ |
 | `mpi+omp` | 2 | 2 (threads=2) | 各バッズが自分の行をさらに CP (第 2 コア) と半分ずつ |
+| `omp` | 1 (size=1) | 2 (threads=2) | 1 バッズで全行を MCU と CP で半分ずつ。リンク通信なし |
 | `single` | 1 (size=1) | 1 | 基準。1 バッズ 1 コアで全行 |
 
 出る行 (UART と SPP ログの両方):
@@ -187,26 +188,30 @@ GEMM-MPI mode=mpi N=32 rank=0 size=2 threads=1 checksum=32768.000000 expect=3276
 GEMM-MPI mode=mpi elapsed=3683 us frames tx=1 rx=0 err=0
 GEMM-MPI mode=mpi+omp N=32 rank=0 size=2 threads=2 checksum=... PASS
 GEMM-MPI mode=mpi+omp elapsed=313258 us frames tx=1 rx=2 err=0
-[omp] last region: primary share=1226 us, extra wait for cp=0 us   ← 並列領域そのものの時間
+[omp] last region (mpi+omp): primary share=1226 us, extra wait for cp=0 us   ← 並列領域そのものの時間
+GEMM-MPI mode=omp N=32 rank=0 size=1 threads=2 checksum=... PASS
+GEMM-MPI mode=omp elapsed=NNNN us frames tx=0 rx=0 err=0
+[omp] last region (omp): primary share=NNNN us, extra wait for cp=0 us
 GEMM-MPI mode=single N=32 rank=0 size=1 threads=1 checksum=... PASS
 GEMM-MPI mode=single elapsed=3783 us frames tx=0 rx=0 err=0
-GEMM-CMP N=32 rank=0 size=2 threads=2 single=3783 us mpi=3683 us mpiomp=313258 us PASS
-GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 worker_on_cp=3
+GEMM-CMP N=32 rank=0 size=2 threads=2 single=3783 us mpi=3683 us mpiomp=313258 us omp=NNNN us PASS
+GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 omp=xN.NN worker_on_cp=6
 ```
-(2026-09-01 Run 16 タップ #2 の実測値。design doc §15.6)
+(2026-09-01 Run 16 タップ #2 の実測値。`omp` 行は Run 17 で追加、`NNNN` は未計測。design doc §15.6)
 
 - `speedup` = single の elapsed ÷ そのモードの elapsed。1.00 未満は「1 バッズ 1 コアより遅い」
   (MPI の Allreduce が TWS リンクを往復する分が上乗せされる)
-- `worker_on_cp` は起動からの累計で、CP 側で実際に走った parallel 領域の回数。`mpi+omp` を
-  1 回走らせるごとに 1 増えるのが正常。増えなければ第 2 コアは使われていない
+- `worker_on_cp` は起動からの累計で、CP 側で実際に走った parallel 領域の回数。比較ラン 1 回
+  (`mpi+omp` と `omp` で各 1) ごとに 2 増えるのが正常。増えなければ第 2 コアは使われていない
   (`[omp] FAIL cp open …` か `[omp] FAIL worker timeout` が手前に出る)
-- `threads=1` のまま `mpi+omp` が出るときは CP open に失敗して逐次にフォールバックしている
+- `threads=1` のまま `mpi+omp` / `omp` が出るときは CP open に失敗して逐次にフォールバックしている
 - elapsed は µs (fast timer)。従来の `elapsed=%u ms` 行は無くなった
 - `GEMM-MPI mode=single … rank=0 size=1` は左右どちらのバッズも出す (single は各自ローカルに走る)
 - `[omp] last region` の `primary share` が MCU 側の担当行の計算時間、`extra wait for cp` が
   その後さらに CP を待った時間。後者が 0〜1 us なら CP は MCU より先に終わっている。**mpi / mpi+omp
-  の elapsed は TWS の Allreduce 待ち (sniff 復帰で ~300 ms) が支配的**なので、コアの効果は
-  この行と single の比で読む (実測: 1226 us vs 3783 us、§15.6)
+  の elapsed は TWS の Allreduce 待ち (sniff 復帰で ~300 ms) が支配的**なので、2 コアの効果は
+  リンクを使わない `omp` の elapsed と single の比 (`speedup … omp=`) で読む。`[omp] last region`
+  は並列領域だけの内訳 (実測: mpi+omp で 1226 us vs single 3783 us、§15.6)
 - 起動時ランはクロックを上げる前に走るので single が 15 ms 前後、タップ時は 3.8 ms 前後
 
 ## 5. UART の見方

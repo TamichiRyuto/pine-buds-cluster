@@ -543,12 +543,13 @@ mt3_result mpi_ibrt_run_mt3(int rank, int size, const char *mode) {
     return r;
 }
 
-// Design §15.2 item 6: run the bench three ways and report the speed-up
+// Design §15.2 item 6: run the bench four ways and report the speed-up
 // against a single core on a single bud. Collectives first (mpi, then
-// mpi+omp with the CP worker), the local single run last, so both buds
-// leave the 2-rank seams at the same point before re-bootstrapping as
-// size 1. Every rank prints its own GEMM-CMP lines: COM6 only ever shows
-// the IBRT master's ring (§13.14-4), and either side can be master.
+// mpi+omp with the CP worker), then the two local runs (omp = this bud's
+// two cores, single = one core), so both buds leave the 2-rank seams at
+// the same point before re-bootstrapping as size 1. Every rank prints its
+// own GEMM-CMP lines: COM6 only ever shows the IBRT master's ring
+// (§13.14-4), and either side can be master.
 void mpi_ibrt_speedup_parts(unsigned base_us, unsigned mode_us, int *whole,
                             int *frac2) {
     float sp = (mode_us == 0u) ? 0.0f : (float)base_us / (float)mode_us;
@@ -558,6 +559,20 @@ void mpi_ibrt_speedup_parts(unsigned base_us, unsigned mode_us, int *whole,
 }
 
 void mpi_ibrt_install_seams(int rank, int size);  // defined below
+
+// Separate the CP's share of a forked mode's time from the TWS link: the
+// region itself is only these two numbers, everything else in the elapsed
+// figure is Allreduce over the link (nothing, for the local omp mode).
+void mpi_ibrt_trace_last_region(const char *mode) {
+    unsigned int primary = 0;
+    unsigned int extra = 0;
+    omp_cp_port_last_ticks(&primary, &extra);
+    COMPUTE_TRACE(3,
+                  "[omp] last region (%s): primary share=%u us, extra wait "
+                  "for cp=%u us",
+                  mode, (unsigned)mpi_ibrt_fast_ticks_to_us(primary),
+                  (unsigned)mpi_ibrt_fast_ticks_to_us(extra));
+}
 
 void mpi_ibrt_run_compare(int rank, int size) {
     mpi_ibrt_install_seams(rank, size);
@@ -570,41 +585,41 @@ void mpi_ibrt_run_compare(int rank, int size) {
     mt3_result r_mpiomp = mpi_ibrt_run_mt3(rank, size, "mpi+omp");
     int omp_threads = omp_get_max_threads();
     MPI_Finalize();
-    {
-        // Separate the CP's share of the mpi+omp time from the TWS link:
-        // the region itself is only these two numbers, everything else in
-        // the elapsed figure is Allreduce over the link.
-        unsigned int primary = 0;
-        unsigned int extra = 0;
-        omp_cp_port_last_ticks(&primary, &extra);
-        COMPUTE_TRACE(2,
-                      "[omp] last region: primary share=%u us, extra wait "
-                      "for cp=%u us",
-                      (unsigned)mpi_ibrt_fast_ticks_to_us(primary),
-                      (unsigned)mpi_ibrt_fast_ticks_to_us(extra));
-    }
+    mpi_ibrt_trace_last_region("mpi+omp");
+
+    // omp: this bud alone, both cores. No link traffic at all, so this is
+    // the clean two-core figure the mpi+omp elapsed cannot show.
+    mpi_ibrt_install_seams(0, 1);
+    omp_set_num_threads(omp_get_num_procs());
+    mt3_result r_omp = mpi_ibrt_run_mt3(0, 1, "omp");
+    MPI_Finalize();
+    mpi_ibrt_trace_last_region("omp");
 
     mpi_ibrt_install_seams(0, 1);
     omp_set_num_threads(1);
     mt3_result r_single = mpi_ibrt_run_mt3(0, 1, "single");
     MPI_Finalize();
 
-    int all_pass = r_mpi.pass && r_mpiomp.pass && r_single.pass;
-    int w_mpi = 0, f_mpi = 0, w_mpiomp = 0, f_mpiomp = 0;
+    int all_pass =
+        r_mpi.pass && r_mpiomp.pass && r_omp.pass && r_single.pass;
+    int w_mpi = 0, f_mpi = 0, w_mpiomp = 0, f_mpiomp = 0, w_omp = 0,
+        f_omp = 0;
     mpi_ibrt_speedup_parts(r_single.elapsed_us, r_mpi.elapsed_us, &w_mpi,
                            &f_mpi);
     mpi_ibrt_speedup_parts(r_single.elapsed_us, r_mpiomp.elapsed_us,
                            &w_mpiomp, &f_mpiomp);
-    COMPUTE_TRACE(8,
+    mpi_ibrt_speedup_parts(r_single.elapsed_us, r_omp.elapsed_us, &w_omp,
+                           &f_omp);
+    COMPUTE_TRACE(9,
                   "GEMM-CMP N=%d rank=%d size=%d threads=%d single=%u us "
-                  "mpi=%u us mpiomp=%u us %s",
+                  "mpi=%u us mpiomp=%u us omp=%u us %s",
                   kBenchN, rank, size, omp_threads, r_single.elapsed_us,
-                  r_mpi.elapsed_us, r_mpiomp.elapsed_us,
+                  r_mpi.elapsed_us, r_mpiomp.elapsed_us, r_omp.elapsed_us,
                   all_pass ? "PASS" : "FAIL");
-    COMPUTE_TRACE(6,
+    COMPUTE_TRACE(8,
                   "GEMM-CMP rank=%d speedup vs single: mpi=x%d.%02d "
-                  "mpiomp=x%d.%02d worker_on_cp=%u",
-                  rank, w_mpi, f_mpi, w_mpiomp, f_mpiomp,
+                  "mpiomp=x%d.%02d omp=x%d.%02d worker_on_cp=%u",
+                  rank, w_mpi, f_mpi, w_mpiomp, f_mpiomp, w_omp, f_omp,
                   omp_cp_port_worker_runs());
 }
 

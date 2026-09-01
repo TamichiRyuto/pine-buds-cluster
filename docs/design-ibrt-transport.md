@@ -2727,13 +2727,18 @@ WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォ
    両コアから見える
 5. **計測**: `mpi_ibrt_wtime` を fast timer (µs) に変える (既存 seam `mpi_adapter_set_wtime`
    のまま)。ラン本体は変えず `MPI_Wtime()` 差分を µs で出す
-6. **3 モード比較ラン** (起動時・5 連タップとも): 順序は **mpi → mpi+omp → single**。
+6. **4 モード比較ラン** (起動時・5 連タップとも): 順序は **mpi → mpi+omp → omp → single**。
    mpi / mpi+omp は現行 seams (rank, size) で `omp_set_num_threads(1)` /
-   `omp_set_num_threads(omp_get_max_threads())`、single は `mpi_ibrt_install_seams(0, 1)` で
-   両バッズがローカルに走る。集団通信を先に、ローカルを最後にするので相手の seams 状態と
-   食い違わない。各モードは既存の `GEMM-MPI …` 行を `mode=` 付きで出し、rank 0 が最後に
-   `GEMM-CMP N=32 size=%d single=%u us mpi=%u us mpiomp=%u us speedup mpi=x%d.%02d mpiomp=x%d.%02d PASS|FAIL`
+   `omp_set_num_threads(omp_get_num_procs())`、omp / single は `mpi_ibrt_install_seams(0, 1)` で
+   両バッズがローカルに走る (omp = threads 2、single = threads 1)。集団通信を先に、ローカルを
+   後にするので相手の seams 状態と食い違わない。各モードは既存の `GEMM-MPI …` 行を `mode=`
+   付きで出し、各 rank が最後に
+   `GEMM-CMP N=32 rank=%d size=%d threads=%d single=%u us mpi=%u us mpiomp=%u us omp=%u us PASS|FAIL`
+   と `GEMM-CMP rank=%d speedup vs single: mpi=x%d.%02d mpiomp=x%d.%02d omp=x%d.%02d worker_on_cp=%u`
    を出す。速度向上率 = single / mode を float で計算し `mpi_ibrt_float_to_parts` で表示。
+   `omp` はリンクを一切使わないので、§15.6 で mpi+omp の elapsed が TWS 待ちに埋もれた問題を
+   避けて「1 バッズ 2 コア」の速度向上率がそのまま読める (2026-09-01 追加、Run 17 で計測)。
+   forked モード (mpi+omp / omp) の後には `[omp] last region (<mode>): …` で並列領域の内訳を出す。
    縮退 (size 1) では mpi はシングル相当になる (`size=1` で判別)。COM6 に届くのは master 側の
    リングだけという §13.14-4 の制約はそのまま
 
