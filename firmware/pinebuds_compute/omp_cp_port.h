@@ -16,6 +16,12 @@ int omp_cp_port_init(void);
 // at the time fn was called). Device-check evidence, §15.4.
 unsigned omp_cp_port_worker_runs(void);
 
+// Fast-timer ticks of the last forked region, measured on the MCU:
+// primary_share = event posted -> primary finished its own rows;
+// extra_wait_for_cp = how much longer join waited for the CP after that.
+void omp_cp_port_last_ticks(unsigned int *primary_share,
+                            unsigned int *extra_wait_for_cp);
+
 #ifdef __cplusplus
 }
 #endif

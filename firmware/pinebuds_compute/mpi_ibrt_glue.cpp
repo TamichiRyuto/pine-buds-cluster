@@ -570,6 +570,19 @@ void mpi_ibrt_run_compare(int rank, int size) {
     mt3_result r_omp = mpi_ibrt_run_mt3(rank, size, "mpi+omp");
     int omp_threads = omp_get_max_threads();
     MPI_Finalize();
+    {
+        // Separate the CP's share of the mpi+omp time from the TWS link:
+        // the region itself is only these two numbers, everything else in
+        // the elapsed figure is Allreduce over the link.
+        unsigned int primary = 0;
+        unsigned int extra = 0;
+        omp_cp_port_last_ticks(&primary, &extra);
+        COMPUTE_TRACE(2,
+                      "[omp] last region: primary share=%u us, extra wait "
+                      "for cp=%u us",
+                      (unsigned)mpi_ibrt_fast_ticks_to_us(primary),
+                      (unsigned)mpi_ibrt_fast_ticks_to_us(extra));
+    }
 
     mpi_ibrt_install_seams(0, 1);
     omp_set_num_threads(1);

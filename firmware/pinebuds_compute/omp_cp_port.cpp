@@ -41,6 +41,13 @@ osSemaphoreDef(omp_cp_done_sem);
 int g_cp_open = 0;
 unsigned g_worker_runs = 0;
 
+// MCU-side fast-timer stamps of the last region (design §15.4 evidence):
+// start = event posted, join_enter = primary finished its own share,
+// done = join observed the CP's done flag.
+uint32_t g_t_start = 0;
+uint32_t g_t_join_enter = 0;
+uint32_t g_t_done = 0;
+
 // --- runs on the CP -----------------------------------------------------
 
 CP_TEXT_SRAM_LOC int self_is_worker(void) {
@@ -81,6 +88,7 @@ int worker_start(void (*fn)(void *), void *data) {
     g_job.fn = fn;
     g_job.data = data;
     g_job.done = 0;
+    g_t_start = hal_fast_sys_timer_get();
     return cp_accel_send_event_mcu2cp(CP_BUILD_ID(CP_TASK_HW, kEvtRun));
 }
 
@@ -88,6 +96,7 @@ void worker_join(void) {
     // The done flag is the truth; the semaphore only wakes us. A stale token
     // (from an earlier timeout) therefore cannot end a join early.
     uint32_t t0 = GET_CURRENT_MS();
+    g_t_join_enter = hal_fast_sys_timer_get();
     while (!g_job.done) {
         uint32_t waited = (uint32_t)(GET_CURRENT_MS() - t0);
         if (waited >= kJoinTimeoutMs) {
@@ -97,6 +106,7 @@ void worker_join(void) {
         }
         osSemaphoreWait(g_done_sem, kJoinTimeoutMs - waited);
     }
+    g_t_done = hal_fast_sys_timer_get();
     g_job.fn = 0;
 }
 
@@ -147,3 +157,9 @@ extern "C" int omp_cp_port_init(void) {
 }
 
 extern "C" unsigned omp_cp_port_worker_runs(void) { return g_worker_runs; }
+
+extern "C" void omp_cp_port_last_ticks(uint32_t *primary_share,
+                                       uint32_t *extra_wait_for_cp) {
+    *primary_share = (uint32_t)(g_t_join_enter - g_t_start);
+    *extra_wait_for_cp = (uint32_t)(g_t_done - g_t_join_enter);
+}
