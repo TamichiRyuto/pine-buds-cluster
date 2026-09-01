@@ -18,7 +18,7 @@
 //        region num_threads is still 1
 // [x] R3 team of 2: fn runs twice (worker + inline), worker sees id 1,
 //        inline sees id 0, both see 2 threads, join once after inline
-// [ ] R4 omp_set_num_threads: 1 -> no worker; 5 -> clamped to 2;
+// [x] R4 omp_set_num_threads: 1 -> no worker; 5 -> clamped to 2;
 //        0 / negative -> ignored
 // [ ] R5 num_threads argument overrides nthreads-var (1 -> sequential,
 //        2 -> team of 2)
@@ -207,6 +207,36 @@ static void test_r4_set_num_threads_clamps_to_capacity() {
     omp_set_port(0);
 }
 
+static void test_r5_num_threads_argument_overrides_nthreads_var() {
+    install_fake_port();
+    int payload = 0;
+
+    // num_threads(1) clause -> sequential even though 2 are allowed.
+    omp_set_num_threads(2);
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 1, 0);
+    CHECK(g_seen.calls == 1);
+    CHECK(g_fake.starts == 0);
+    CHECK(g_seen.num_threads[0] == 1);
+
+    // num_threads(2) clause -> team of 2 even after omp_set_num_threads(1).
+    omp_set_num_threads(1);
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 2, 0);
+    CHECK(g_seen.calls == 2);
+    CHECK(g_fake.starts == 1);
+    CHECK(g_seen.num_threads[0] == 2);
+
+    // The clause never exceeds the capacity either.
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 8, 0);
+    CHECK(g_seen.calls == 2);
+    CHECK(g_seen.num_threads[0] == 2);
+
+    omp_set_num_threads(2);
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
@@ -215,5 +245,6 @@ int main() {
     RUN_TEST(test_r2_port_reports_two_threads_available);
     RUN_TEST(test_r3_team_of_two_runs_worker_and_inline);
     RUN_TEST(test_r4_set_num_threads_clamps_to_capacity);
+    RUN_TEST(test_r5_num_threads_argument_overrides_nthreads_var);
     return testfw::summary();
 }

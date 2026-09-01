@@ -67,10 +67,12 @@ extern "C" void omp_set_port(const omp_port *port) {
 
 extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
                                unsigned num_threads, unsigned flags) {
-    (void)num_threads;
     (void)flags;
 
-    if (omp_get_max_threads() >= 2) {
+    int requested = (num_threads > 0) ? (int)num_threads : omp_get_max_threads();
+    int team = min_int(requested, capacity());
+
+    if (team >= 2) {
         g_team_size = 2;
         g_port->worker_start(fn, data);
         fn(data);
@@ -79,5 +81,6 @@ extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
         return;
     }
 
+    g_team_size = 1;
     fn(data);
 }
