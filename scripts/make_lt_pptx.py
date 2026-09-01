@@ -219,23 +219,24 @@ def plain_table(slide, x, y, w, h, data, widths=None, size=11.5, head_size=11.5,
     return tbl
 
 
-def slide(title=None, kicker=None, note=None):
+TOTAL_PAGES = 15
+_page = [0]
+
+
+def slide(title=None, note=None):
     s = prs.slides.add_slide(BLANK)
     if title:
+        _page[0] += 1
         text(s, M, 0.30, CW - 2.0, 0.62, title, size=26, bold=True,
              anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
-        if kicker:
-            text(s, W - M - 3.4, 0.36, 3.4, 0.5, kicker, size=11.5, color=FAINT,
-                 align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
+        text(s, W - M - 3.4, 0.36, 3.4, 0.5, "%d / %d" % (_page[0], TOTAL_PAGES),
+             size=11.5, color=FAINT, align=PP_ALIGN.RIGHT, anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
         hline(s, M, 1.06, CW)
+        text(s, W - M - 1.2, H - 0.46, 1.2, 0.3, str(_page[0]), size=10, color=FAINT,
+             align=PP_ALIGN.RIGHT, pad=0.0)
     if note:
         s.notes_slide.notes_text_frame.text = note
     return s
-
-
-def pagenum(s, n):
-    text(s, W - M - 1.2, H - 0.46, 1.2, 0.3, str(n), size=10, color=FAINT,
-         align=PP_ALIGN.RIGHT, pad=0.0)
 
 
 # ------------------------------------------------------------------ slide 1
@@ -254,7 +255,7 @@ text(s, W - M - 4.0, 4.95, 4.0, 0.6, "LT 8 分", size=15, color=MUTED,
      align=PP_ALIGN.RIGHT, pad=0.0)
 
 # ------------------------------------------------------------------ slide 2
-s = slide("自己紹介 & サマリ", "1 / 14",
+s = slide("自己紹介 & サマリ",
           note="この 3 行と 6 個の数字だけ持ち帰ってもらえれば成功。"
                "「速くなった」とは一言も言っていないことに注意。")
 panel(s, M, 1.30, 4.05, 2.55, [
@@ -287,10 +288,9 @@ for i, (big, small) in enumerate(tiles):
     text(s, tx, ty + 0.10, tw, 0.52, big, size=19, bold=True, align=PP_ALIGN.CENTER, pad=0.05)
     text(s, tx, ty + 0.63, tw, 0.44, small, size=11.5, color=MUTED,
          align=PP_ALIGN.CENTER, pad=0.05)
-pagenum(s, 1)
 
 # ------------------------------------------------------------------ slide 3
-s = slide("並列計算のおさらい — MPI と OpenMP", "2 / 14",
+s = slide("並列計算のおさらい — MPI と OpenMP",
           note="HPC の定石「ノード間は MPI、ノード内は OpenMP」のハイブリッド構成。"
                "今回はこの標準的な書き方をそのまま持ち込むのがテーマ。")
 NX, NY, NW, NH = M, 1.24, 5.35, 2.42
@@ -342,10 +342,9 @@ arrow(s, BX + 3.45, BY + 1.36, 0.44, 0.34, MSO_SHAPE.DOWN_ARROW)
 text(s, BX + 0.12, BY + 1.74, BW - 0.24, 0.72,
      "MPI_Send / MPI_Recv で結果を集約し、\nrank 0 が全体の checksum を検証して PASS / FAIL",
      size=11.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.03)
-pagenum(s, 2)
 
 # ------------------------------------------------------------------ slide 4
-s = slide("今回のクラスタ構成", "3 / 14",
+s = slide("今回のクラスタ構成",
           note="「USB を挿したまま」ではなく「耳に入れたまま」に近づいたことを強調する。")
 for i, (nm, rk, role) in enumerate([("右バッズ", "rank 0", "nv_role = MASTER"),
                                     ("左バッズ", "rank 1", "nv_role = SLAVE")]):
@@ -380,10 +379,9 @@ for i, (h, b) in enumerate(cols):
     tx = M + i * (tw + 0.22)
     panel(s, tx, 5.52, tw, 1.32, [(b, {"space": 0})], size=11.5, head=h, head_size=12.5,
           color=MUTED)
-pagenum(s, 3)
 
 # ------------------------------------------------------------------ slide 5
-s = slide("実験機材: PineBuds Pro", "4 / 14",
+s = slide("実験機材: PineBuds Pro",
           note="手元の個体のケースは Wiki 記載の CH342DS ではなく CH347 だった (ハードリビジョン差)。"
                "どちらも CDC-ACM なので手順は同じ。")
 plain_table(s, M, 1.24, 7.35, 4.6, [
@@ -419,10 +417,9 @@ code(s, 8.20, 5.56, 4.58, 1.28, [
     "hello, C++ from PineBuds (core=0)",
     "GEMM ... checksum=32768.000000 PASS",
 ], size=10)
-pagenum(s, 4)
 
 # ------------------------------------------------------------------ slide 6
-s = slide("なぜ「普通のワイヤレスイヤホン」ではダメだったのか", "5 / 14",
+s = slide("なぜ「普通のワイヤレスイヤホン」ではダメだったのか",
           note="「Linux が動くイヤホン」ではなく「自分のコードを載せられるイヤホン」を探した、という話。"
                "文鎮化リスクは共感を得やすい。実際いちばん最初にやったのは工場ファームの全量バックアップ。")
 rect(s, M, 1.22, CW, 0.52, FILL, BOX)
@@ -458,10 +455,9 @@ rect(s, M, 6.10, CW, 0.62, FILL2, BOX)
 text(s, M, 6.10, CW, 0.62,
      "→  「オープンソースファーム」と「ケースが UART プログラマ」を両立している TWS が、探した範囲でここだけだったので購入",
      size=14.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.12)
-pagenum(s, 5)
 
 # ------------------------------------------------------------------ slide 7
-s = slide("やったこと — 全体像", "6 / 14",
+s = slide("やったこと — 全体像",
           note="「アダプタが嘘をついていないこと」を本物の OpenMPI との一致で担保した、"
                "というのが一番言いたい設計判断。")
 layers = [
@@ -486,10 +482,80 @@ panel(s, M, 5.58, CW, 1.10, [
 text(s, M, 6.78, CW, 0.32,
      "規模: adapters 926 行 / firmware 統合 1,656 行 / tests 1,846 行 / 設計ドキュメント 2,643 行",
      size=11.5, color=MUTED, pad=0.02)
-pagenum(s, 6)
 
 # ------------------------------------------------------------------ slide 8
-s = slide("実装の山場 ① — SDK にソースが無い", "7 / 14",
+# ------------------------------------------------------------- slide: dev env
+LANE_FILL = [RGBColor(0xE9, 0xF1, 0xF8), RGBColor(0xE4, 0xF2, 0xF3),
+             RGBColor(0xEE, 0xEB, 0xF7), RGBColor(0xF8, 0xF2, 0xE6)]
+LANE_HEAD = [RGBColor(0xD6, 0xE6, 0xF3), RGBColor(0xCF, 0xE8, 0xEA),
+             RGBColor(0xE1, 0xDC, 0xF1), RGBColor(0xF2, 0xE6, 0xCF)]
+s = slide("開発環境 — 1 回の実験に必要なもの",
+          note="4 つの世界をまたがないと 1 回も試せない、という絵。"
+               "「WSL の中の Docker の中の GCC で焼いて、Windows の Python で受ける」と言うと笑いが取れる。")
+lanes = [
+    ("🐧", "WSL2  Ubuntu 22.04", [
+        "コードを書くのは全部ここ",
+        "make test → 1,788 checks (g++)",
+        "make check98 で gnu++98 方言を担保",
+        "install-into-sdk.sh で SDK に配置",
+        "git / GitHub",
+    ]),
+    ("🐳", "Docker  OpenPineBuds", [
+        "./start_dev.sh で開発コンテナ",
+        "docker compose run --rm builder",
+        "        ./build.sh",
+        "→ open_source.bin (904 KB)",
+        "backup.sh で工場 FW を全量退避",
+    ]),
+    ("🪟", "Windows 11", [
+        "usbipd attach --wsl で",
+        "  充電ケースを WSL に渡す",
+        "→ /dev/ttyACM0 (右) / ttyACM1 (左)",
+        "spp_tail.py COM6 で",
+        "  Bluetooth SPP ログを受信",
+    ]),
+    ("🎧", "PineBuds Pro  実機", [
+        "bestool write-image を左右 2 個に",
+        "「出して 3 秒待って戻す」",
+        "  = リブート (書き込みトリガ)",
+        "picocom -b 2000000 /dev/ttyACM0",
+        "5 連タップで再実行",
+    ]),
+]
+lw = (CW - 3 * 0.20) / 4
+for i, (icon, name, items) in enumerate(lanes):
+    lx = M + i * (lw + 0.20)
+    rect(s, lx, 1.24, lw, 2.55, LANE_FILL[i], BOX)
+    rect(s, lx, 1.24, lw, 0.56, LANE_HEAD[i], BOX)
+    text(s, lx + 0.10, 1.30, 0.48, 0.44, icon, size=20, pad=0.0)
+    text(s, lx + 0.62, 1.30, lw - 0.72, 0.44, name, size=12.5, bold=True,
+         anchor=MSO_ANCHOR.MIDDLE, pad=0.0)
+    def _jp(t):
+        return any("\u3040" <= c <= "\u30ff" or "\u4e00" <= c <= "\u9fff" for c in t)
+    body = [(t, {"space": 6, "size": 10, "name": JP if _jp(t) else MONO}) for t in items]
+    text(s, lx + 0.08, 1.88, lw - 0.16, 1.85, body, size=10, pad=0.04)
+
+rect(s, M, 4.02, CW, 2.06, FILL, BOX)
+rect(s, M, 4.02, CW, 0.44, FILL2, BOX)
+text(s, M, 4.02, CW, 0.44, "1 サイクル — 4 つの世界を 1 周しないと 1 回も試せない", size=13.5,
+     bold=True, anchor=MSO_ANCHOR.MIDDLE, pad=0.12)
+chips = ["① 書く", "② ホストで緑", "③ SDK に配置", "④ ビルド", "⑤ 焼く", "⑥ 耳で観る"]
+cw_ = (CW - 0.60 - 5 * 0.30) / 6
+for i, c in enumerate(chips):
+    cx = M + 0.30 + i * (cw_ + 0.30)
+    rect(s, cx, 4.66, cw_, 0.74, WHITE, BOX)
+    text(s, cx, 4.66, cw_, 0.74, c, size=13, bold=True, anchor=MSO_ANCHOR.MIDDLE,
+         align=PP_ALIGN.CENTER, pad=0.02)
+    if i < 5:
+        arrow(s, cx + cw_ + 0.02, 4.88, 0.26, 0.30, MSO_SHAPE.RIGHT_ARROW)
+text(s, M, 5.56, CW, 0.36,
+     "⑥ で見つけた不具合は ① に戻る。② が緑にならないうちは ④ に進まない — 焼いてから気づくと左右 2 個ぶんやり直し",
+     size=11, color=MUTED, align=PP_ALIGN.CENTER, pad=0.0)
+text(s, M, 6.30, CW, 0.40,
+     "WSL の中の Docker の中の GCC でビルドして、Windows の Python で結果を受ける",
+     size=14, bold=True, align=PP_ALIGN.CENTER, pad=0.0)
+
+s = slide("実装の山場 ① — SDK にソースが無い",
           note="「ヘッダを信じるな、リンクされるバイナリを信じろ」。ここは技術者ウケが良いはず。")
 rect(s, M, 1.22, CW, 0.60, FILL, BOX)
 text(s, M, 1.22, CW, 0.60,
@@ -522,10 +588,9 @@ panel(s, 7.10, 4.62, 5.68, 2.20, [
     ("・ 追加 RAM: MPI 5.5 KB + SPP ログ 9.3 KB ≒ 15 KB", {"space": 3}),
     ("   RAM 残 330 KB に対して余裕", {"space": 0, "color": MUTED, "size": 11}),
 ], size=12, head="実装したトランスポート")
-pagenum(s, 7)
 
 # ------------------------------------------------------------------ slide 9
-s = slide("実装の山場 ② — 実機は 1 発では動かない", "8 / 14",
+s = slide("実装の山場 ② — 実機は 1 発では動かない",
           note="逆アセンブルではなく nm でシンボル解決して犯人を特定した、という小ネタも入る。"
                "「組み込みは電源とペアリングで死ぬ」は共感ポイント。")
 plain_table(s, M, 1.22, 7.60, 4.50, [
@@ -563,10 +628,9 @@ panel(s, 8.35, 5.04, 4.43, 1.20, [
 rect(s, M, 5.92, 7.60, 0.60, FILL2, BOX)
 text(s, M, 5.92, 7.60, 0.60, "6 個の地雷のうち、計算に起因するものはゼロ。全部が電源・接続・RTOS・SDK 仕様。",
      size=12.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.1)
-pagenum(s, 8)
 
 # ------------------------------------------------------------------ slide 10
-s = slide("実装の山場 ③ — 観測をワイヤレスに / 耳で操作する", "9 / 14",
+s = slide("実装の山場 ③ — 観測をワイヤレスに / 耳で操作する",
           note="デモ的に一番「おっ」となるところ。ケースの中でもタッチは反応する。")
 rect(s, M, 1.22, CW, 0.46, FILL, BOX)
 text(s, M, 1.22, CW, 0.46, "USB ケーブルで繋がったイヤホンは、もはやイヤホンではない",
@@ -606,10 +670,9 @@ for i, (h, b) in enumerate(steps):
 text(s, M, 6.42, CW, 0.40,
      "実行中の連打は捨てる。相手の START が落ちたらタップした側だけが走り、5 秒のストール検出を経て縮退で完走する。",
      size=11.5, color=MUTED, align=PP_ALIGN.CENTER, pad=0.0)
-pagenum(s, 9)
 
 # ------------------------------------------------------------------ slide 11
-s = slide("結果 ① — 実機ログ (両バッズ / 全条件 PASS)", "10 / 14",
+s = slide("結果 ① — 実機ログ (両バッズ / 全条件 PASS)",
           note="32768 = 32³。全要素 1 の行列積は整数値しか通らないので float32 で厳密に一致する。"
                "誤差 1 ulp も許さない判定にしてある、は必ず言う。")
 code(s, M, 1.22, 7.55, 4.40, [
@@ -652,10 +715,9 @@ panel(s, 8.32, 4.28, 4.46, 2.44, [
     ("→ float32 でも丸め誤差がゼロ", {"space": 3, "color": MUTED}),
     ("→ 厳密一致以外を許さない判定にできる", {"space": 0, "bold": True}),
 ], size=11.5, head="なぜ checksum で判定できるのか")
-pagenum(s, 10)
 
 # ------------------------------------------------------------------ slide 12
-s = slide("結果 ② — ワイヤレス受信と 5 連タップ再実行", "11 / 14",
+s = slide("結果 ② — ワイヤレス受信と 5 連タップ再実行",
           note="「イヤホンをトントントントントンと叩くと、両耳で行列積が走って、"
                "結果が Bluetooth で PC に飛ぶ」で締める。")
 code(s, M, 1.22, 6.55, 2.62, [
@@ -701,10 +763,9 @@ rect(s, M, 6.10, 6.55, 0.72, FILL2, BOX)
 text(s, M, 6.10, 6.55, 0.72,
      "耳を 5 回叩くと両バッズで行列積が走り、\n実行ログが Bluetooth 経由で PC に流れてくる",
      size=13.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.08, space=2)
-pagenum(s, 11)
 
 # ------------------------------------------------------------------ slide 13
-s = slide("結果 ③ — 数字で見る", "12 / 14",
+s = slide("結果 ③ — 数字で見る",
           note="「速くなりませんでした」で終わらせず、なぜ遅いかが定量的に説明できることを成果として出す。")
 plain_table(s, M, 1.22, 7.55, 1.80, [
     ["指標", "実測値", "コメント"],
@@ -747,10 +808,9 @@ rect(s, M, 6.14, CW, 0.70, FILL2, BOX)
 text(s, M, 6.14, CW, 0.70,
      "速くはならなかった。が、HPC の教科書どおりの結論を、耳の中で定量的に再現できた。",
      size=14.5, bold=True, anchor=MSO_ANCHOR.MIDDLE, align=PP_ALIGN.CENTER, pad=0.1)
-pagenum(s, 12)
 
 # ------------------------------------------------------------------ slide 14
-s = slide("わかったこと / できていないこと", "13 / 14",
+s = slide("わかったこと / できていないこと",
           note="できていないことを先に自分で言い切ると、質疑が建設的になる。")
 items_ok = [
     ("標準 API のまま実機に載る", "bench/ のソースは本物の OpenMPI でも自作アダプタでも無改変でビルドでき、3 経路すべて checksum 一致。アダプタ境界の設計が正しかった"),
@@ -776,10 +836,9 @@ for col, (head, items, mark, mc) in enumerate([
         text(s, cx + 0.14, iy, 0.32, 0.36, mark, size=15, bold=True, color=mc, pad=0.0)
         text(s, cx + 0.48, iy - 0.02, cw - 0.66, 0.36, h, size=12.5, bold=True, pad=0.0)
         text(s, cx + 0.48, iy + 0.32, cw - 0.66, 0.82, b, size=10.5, color=MUTED, pad=0.0)
-pagenum(s, 13)
 
 # ------------------------------------------------------------------ slide 15
-s = slide("まとめ", "14 / 14",
+s = slide("まとめ",
           note="締め:「みなさんの耳にも、暇をしている Cortex-M4F が 2 個入っています」。")
 rect(s, M, 1.22, CW, 0.86, FILL2, BOX)
 text(s, M, 1.22, CW, 0.86, "1 万円のワイヤレスイヤホン 2 個  =  2 ノードの MPI クラスタ",
@@ -810,7 +869,6 @@ text(s, M, 6.62, CW, 0.80, [
     ("設計・実機ログ・失敗の記録はすべて docs/design-ibrt-transport.md (2,643 行) にあります",
      {"space": 0, "size": 11.5, "color": MUTED, "align": PP_ALIGN.CENTER}),
 ], pad=0.0)
-pagenum(s, 14)
 
 os.makedirs(os.path.dirname(OUT), exist_ok=True)
 prs.save(OUT)
