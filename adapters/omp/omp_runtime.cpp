@@ -1,8 +1,25 @@
 // OpenMP runtime for the unmodified-benchmark strategy (adapters/omp).
+//
+// Stage 2 (docs/design-ibrt-transport.md §15): GCC's -fopenmp outlines
+// `#pragma omp parallel for` into fn(data) plus a call to GOMP_parallel;
+// this file provides that entry with the libgomp ABI, forking a team of at
+// most two (primary + one worker) through the omp_port seam. Without a
+// port everything is sequential (Stage 1). gnu++98, freestanding.
+//
+// Placement: on the target the worker is the second Cortex-M4F, which
+// cannot execute from flash, so the two queries the outlined body calls
+// (omp_get_num_threads / omp_get_thread_num) live in .cp_text_sram.
 #include "omp.h"
 #include "omp_adapter.h"
 
 #include <time.h>
+
+#ifdef PINEBUDS_TARGET
+#include "hal_location.h"
+#define OMP_CP_TEXT CP_TEXT_SRAM_LOC
+#else
+#define OMP_CP_TEXT
+#endif
 
 namespace {
     // Host time source, isolated so a target port can swap this for a hal
@@ -13,8 +30,8 @@ namespace {
 
     const omp_port *g_port = 0;
 
-    // File-local team state: 1 outside a parallel region, 2 while a team
-    // of two is active (R3).
+    // Size of the innermost active team: 1 outside any region or in a
+    // nested one, 2 while a forked region is running.
     int g_team_size = 1;
 
     // OpenMP nthreads-var: 0 means unset (falls back to capacity).
@@ -34,11 +51,11 @@ namespace {
     }
 }
 
-extern "C" int omp_get_num_threads(void) {
+extern "C" OMP_CP_TEXT int omp_get_num_threads(void) {
     return g_team_size;
 }
 
-extern "C" int omp_get_thread_num(void) {
+extern "C" OMP_CP_TEXT int omp_get_thread_num(void) {
     if (g_team_size == 2 && g_port && g_port->self_is_worker()) {
         return 1;
     }
@@ -74,39 +91,31 @@ extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
                                unsigned num_threads, unsigned flags) {
     (void)flags;
 
-    if (g_depth > 0) {
-        // Nested region: default nested=false -> team of one, inline,
-        // no port interaction. Save/restore the outer team state so the
-        // caller sees its own team size and thread id again on return.
-        int saved_team_size = g_team_size;
-        g_team_size = 1;
-        ++g_depth;
-        fn(data);
-        --g_depth;
-        g_team_size = saved_team_size;
-        return;
+    // Team size: the num_threads clause wins over nthreads-var, both capped
+    // by the port capacity. A nested region (default nested=false) is
+    // always a team of one and never touches the port.
+    int team = 1;
+    if (g_depth == 0) {
+        int requested =
+            (num_threads > 0) ? (int)num_threads : omp_get_max_threads();
+        team = min_int(requested, capacity());
     }
 
-    int requested = (num_threads > 0) ? (int)num_threads : omp_get_max_threads();
-    int team = min_int(requested, capacity());
-
+    int saved_team_size = g_team_size;
     ++g_depth;
-    if (team >= 2) {
-        g_team_size = 2;
-        if (g_port->worker_start(fn, data) == 0) {
-            fn(data);
-            g_port->worker_join();
-            g_team_size = 1;
-            --g_depth;
-            return;
-        }
-        g_team_size = 1;
-        fn(data);
-        --g_depth;
-        return;
+
+    // Publish the team before starting the worker: it may query
+    // omp_get_num_threads() before the primary has run its own share.
+    g_team_size = team;
+    int forked = (team >= 2) && (g_port->worker_start(fn, data) == 0);
+    if (!forked) {
+        g_team_size = 1;  // worker refused (or team of one): primary does it all
+    }
+    fn(data);
+    if (forked) {
+        g_port->worker_join();
     }
 
-    g_team_size = 1;
-    fn(data);
+    g_team_size = saved_team_size;
     --g_depth;
 }
