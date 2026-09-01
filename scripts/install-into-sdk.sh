@@ -37,6 +37,13 @@
 #      services/bt_app/besmain.cpp to call spp_log_service_init() on
 #      BesbtThread, just before the event loop -- the same spot the SDK's
 #      own app_tota_init() runs from (docs/design-ibrt-transport.md §13.8)
+#  10. Patches apps/battery/app_battery.cpp so a full battery no longer
+#      calls app_shutdown() while docked: the buds only run in the case
+#      (charging power-on), and a full charge killed every run 15-60 s
+#      after boot -- too short for the PC to open the SPP link. The
+#      FULLCHARGE indication is kept; only the shutdown is guarded out with
+#      the same `if (0 && ...)` style as steps 6 and 8. Hardware charge
+#      termination is unaffected (the PMU charger cuts off on its own)
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -46,7 +53,9 @@ APPS_CPP="${DST}/apps.cpp"
 TARGET_MK="${SDK_DIR}/config/open_source/target.mk"
 SEARCH_PAIR_UI="${SDK_DIR}/services/app_ibrt/src/app_ibrt_search_pair_ui.cpp"
 BESMAIN_CPP="${SDK_DIR}/services/bt_app/besmain.cpp"
+BATTERY_CPP="${SDK_DIR}/apps/battery/app_battery.cpp"
 MARKER="pine-buds-cluster compute hook"
+FULL_CHARGE_MARKER="pine-buds-cluster full-charge keep-alive"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
@@ -230,6 +239,32 @@ text = text.replace(call_anchor, call + call_anchor)
 open(path, "w").write(text)
 EOF
     echo "[ok] spp_log_service_init() hooked into besmain (before the event loop)"
+fi
+
+if grep -q "${FULL_CHARGE_MARKER}" "${BATTERY_CPP}"; then
+    echo "[ok] full-charge keep-alive patch already present"
+else
+    python3 - "${BATTERY_CPP}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# app_battery_handle_process_charging(): once the charger reports full,
+# the SDK sets the FULLCHARGE indication and calls app_shutdown(). Keep the
+# indication (it also guards this block from re-running), drop the
+# shutdown. Same `if (0 && ...)` guard style as the apps.cpp patches.
+old = """      app_status_indication_set(APP_STATUS_INDICATION_FULLCHARGE);
+      app_shutdown();
+"""
+new = """      app_status_indication_set(APP_STATUS_INDICATION_FULLCHARGE);
+      if (0) app_shutdown(); /* pine-buds-cluster full-charge keep-alive */
+"""
+
+text = open(path).read()
+assert text.count(old) == 1, "FULLCHARGE app_shutdown block not unique; re-check"
+text = text.replace(old, new)
+open(path, "w").write(text)
+EOF
+    echo "[ok] full-charge app_shutdown() disabled in apps/battery/app_battery.cpp"
 fi
 
 echo
