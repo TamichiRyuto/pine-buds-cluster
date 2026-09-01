@@ -16,6 +16,8 @@ BENCHBIN := $(BUILDDIR)/test_gemm_bench
 FRAGBIN  := $(BUILDDIR)/test_mpi_frag
 RINGBIN  := $(BUILDDIR)/test_log_ring
 RINGSRC  := firmware/pinebuds_compute/log_ring.cpp
+TRIGBIN  := $(BUILDDIR)/test_run_trigger
+TRIGSRC  := firmware/pinebuds_compute/run_trigger.cpp
 
 # The benchmark source keeps its omp pragmas even in non-OpenMP builds.
 BENCH_WNO := -Wno-unknown-pragmas
@@ -30,17 +32,18 @@ TARGET_DIALECT := -std=gnu++98 -Wall -Wextra -Werror -Wdouble-promotion \
 
 check98:
 	@mkdir -p $(BUILDDIR)/check98
-	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp $(RINGSRC)
+	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp $(RINGSRC) $(TRIGSRC)
 	@mv *.o $(BUILDDIR)/check98/
 	@echo "gnu++98 target-dialect check OK"
 
-test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) check98
+test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) $(TRIGBIN) check98
 	./$(TESTBIN)
 	./$(MPIBIN)
 	./$(OMPBIN)
 	./$(BENCHBIN)
 	./$(FRAGBIN)
 	./$(RINGBIN)
+	./$(TRIGBIN)
 
 $(TESTBIN): tests/test_gemm.cpp $(SRC) $(wildcard src/*.h) tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
@@ -66,6 +69,10 @@ $(BENCHBIN): tests/test_gemm_bench.cpp bench/gemm_mpi_omp.cpp $(MPISRC) $(OMPSRC
 $(RINGBIN): tests/test_log_ring.cpp $(RINGSRC) firmware/pinebuds_compute/log_ring.h tests/test_framework.h
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Ifirmware/pinebuds_compute -Itests tests/test_log_ring.cpp $(RINGSRC) -o $@
+
+$(TRIGBIN): tests/test_run_trigger.cpp $(TRIGSRC) firmware/pinebuds_compute/run_trigger.h tests/test_framework.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -Ifirmware/pinebuds_compute -Itests tests/test_run_trigger.cpp $(TRIGSRC) -o $@
 
 clean:
 	rm -rf $(BUILDDIR)
