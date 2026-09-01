@@ -16,7 +16,7 @@
 // [x] R1 no port: GOMP_parallel runs fn(data) once inline, 1 thread / id 0
 // [x] R2 port (worker_count 1): max_threads 2, num_procs 2, outside a
 //        region num_threads is still 1
-// [ ] R3 team of 2: fn runs twice (worker + inline), worker sees id 1,
+// [x] R3 team of 2: fn runs twice (worker + inline), worker sees id 1,
 //        inline sees id 0, both see 2 threads, join once after inline
 // [ ] R4 omp_set_num_threads: 1 -> no worker; 5 -> clamped to 2;
 //        0 / negative -> ignored
@@ -176,6 +176,37 @@ static void test_r3_team_of_two_runs_worker_and_inline() {
     omp_set_port(0);
 }
 
+static void test_r4_set_num_threads_clamps_to_capacity() {
+    install_fake_port();
+    int payload = 0;
+
+    // 1 -> sequential even with a worker available: no worker_start.
+    omp_set_num_threads(1);
+    CHECK(omp_get_max_threads() == 1);
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+    CHECK(g_seen.calls == 1);
+    CHECK(g_fake.starts == 0);
+    CHECK(g_seen.num_threads[0] == 1);
+    CHECK(g_seen.thread_num[0] == 0);
+
+    // 5 -> clamped to the capacity (2).
+    omp_set_num_threads(5);
+    CHECK(omp_get_max_threads() == 2);
+    reset_seen();
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+    CHECK(g_seen.calls == 2);
+    CHECK(g_fake.starts == 1);
+
+    // 0 / negative -> ignored, previous value (2) stays.
+    omp_set_num_threads(0);
+    CHECK(omp_get_max_threads() == 2);
+    omp_set_num_threads(-3);
+    CHECK(omp_get_max_threads() == 2);
+
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
@@ -183,5 +214,6 @@ int main() {
     RUN_TEST(test_r1_no_port_runs_inline_once);
     RUN_TEST(test_r2_port_reports_two_threads_available);
     RUN_TEST(test_r3_team_of_two_runs_worker_and_inline);
+    RUN_TEST(test_r4_set_num_threads_clamps_to_capacity);
     return testfw::summary();
 }

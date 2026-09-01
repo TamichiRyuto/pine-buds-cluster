@@ -16,6 +16,17 @@ namespace {
     // File-local team state: 1 outside a parallel region, 2 while a team
     // of two is active (R3).
     int g_team_size = 1;
+
+    // OpenMP nthreads-var: 0 means unset (falls back to capacity).
+    int g_nthreads_var = 0;
+
+    int capacity(void) {
+        return 1 + (g_port ? g_port->worker_count() : 0);
+    }
+
+    int min_int(int a, int b) {
+        return a < b ? a : b;
+    }
 }
 
 extern "C" int omp_get_num_threads(void) {
@@ -30,15 +41,20 @@ extern "C" int omp_get_thread_num(void) {
 }
 
 extern "C" int omp_get_max_threads(void) {
-    return 1 + (g_port ? g_port->worker_count() : 0);
+    if (g_nthreads_var == 0) {
+        return capacity();
+    }
+    return min_int(g_nthreads_var, capacity());
 }
 
 extern "C" int omp_get_num_procs(void) {
-    return 1 + (g_port ? g_port->worker_count() : 0);
+    return capacity();
 }
 
 extern "C" void omp_set_num_threads(int n) {
-    (void)n;
+    if (n >= 1) {
+        g_nthreads_var = n;
+    }
 }
 
 extern "C" double omp_get_wtime(void) {
@@ -54,7 +70,7 @@ extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
     (void)num_threads;
     (void)flags;
 
-    if (g_port && g_port->worker_count() >= 1) {
+    if (omp_get_max_threads() >= 2) {
         g_team_size = 2;
         g_port->worker_start(fn, data);
         fn(data);
