@@ -101,6 +101,29 @@ docker compose run --rm builder ./download.sh
 ある (safety-off からの復帰用)。着手前に `backup.sh` の出力を別ディスクに保全し、復旧
 経路を一度確認しておくこと。参照: https://pine64.org/documentation/PineBuds_Pro/Software/
 
+### 4a. SPP ログ用の Windows ペアリング (2026-09-01 実測)
+
+design doc §13.13 の要約。通常ビルドのファームは page scan しか出さないので、Windows 側で
+PineBuds を「デバイスの削除」した後は**再ペアリングできない** (バッズは古いリンクキーで PC を
+page するだけ)。純正の「ケース外でペアリングモード」は充電起動バッズが取り出しで落ちるため使えない。
+
+1. `scripts/install-into-sdk.sh` を実行 (手順 10/11 のパッチが入る)
+2. コンテナ内で `make -j$(nproc) T=open_source DEBUG=1 SPP_LOG_PAIRING=1` (再アームが
+   `GENERAL_ACCESSIBLE` になる。`out/open_source/apps/main/spp_log_service.o` を消してから)
+3. 両バッズに書き込み (§4)。**`download.sh` を二重に走らせない** — bestool は 1 ポート 1 プロセス。
+   書き込み済みなのに再実行すると、次の抜き差しで同じファームを焼き直すだけになる
+4. **左右同時**に「出して 3 秒待って戻す」。discoverable になるのは `[mpi] peer ok` の後だけなので
+   TWS が組めていないと Windows から見えない (UART: `[BTEVENT] ACCESSIBLE_CHANGE ... aMode=0x3`)
+5. Windows: 設定 → Bluetooth とデバイス → デバイスの追加 → `PineBuds Pro`。ペアリングと同時に
+   COM ポートが自動生成される (実測: `COM6` = 発信 `PineBudsLog`、`COM3` = 着信)。
+   `Get-PnpDevice -Class Ports` の InstanceId に `{00001101-…}` と `…202211338768` を含む方が発信
+6. `python spp_tail.py COM6` で `#<seq>` 行が届けば成功
+7. 終わったら `SPP_LOG_PAIRING=1` 無しで焼き直す (docked のまま discoverable を残さない)
+
+注意 (手順 10 の副作用): 満充電シャットダウンを止めたので、「出して 3 秒待って戻す」で
+**再起動しないことがある** (充電端子の `PLUGIN` だけ出て `CHARGING PWRON` が出ない)。
+UART で `CHARGING PWRON!` を確認してから次に進む。
+
 ## 5. UART の見方
 
 ```bash
@@ -155,6 +178,12 @@ GEMM elapsed=<n> ms
 - **WSL2 で docker が見つからない**: Docker Desktop → Settings → Resources →
   WSL integration で該当ディストロを有効化してシェルを開き直す。
 - **ブリック**: §4 の復旧経路。慌てて連続書き込みしない。
+
+- **`spp_tail.py` が `PermissionError(13, ..., 5)` で COM を開けない**: WSL から `timeout N powershell.exe ...`
+  で起動した前回の Windows 側 `python.exe` が COM を掴んだまま残っている (WSL 側の timeout は
+  powershell だけを殺す)。`powershell.exe -Command "Get-CimInstance Win32_Process | ? CommandLine -match spp_tail | Stop-Process -Force"`
+  で回収する。`ERROR_FILE_NOT_FOUND` は Windows ローカル (ポート再作成)、`ERROR_REM_NOT_LIST` は
+  バッズ側が応答していない (電源断 / TWS 未成立で discoverable でない)。
 
 ## 8. 付録 A: リポジトリ構造マップ (Task 0 の成果)
 

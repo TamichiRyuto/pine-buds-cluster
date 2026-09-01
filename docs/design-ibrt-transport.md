@@ -1477,6 +1477,14 @@ RFCOMM チャネル番号は `spp_api.h:161-172` の `RFCOMM_CHANNEL_1..10` = **
 **`RFCOMM_CHANNEL_10` (= 19) が未割当**。これを使う。将来 TOTA や FastPair を有効化しても
 チャネルが衝突しない。
 
+> **実測で覆った (2026-09-01, §13.13)。** この blob では `btif_spp_open` が ID_10 / チャネル 19 に
+> `BT_STS_FAILED` を返す (`rfcomm_register_server: channel 19 already existing.`)。他に 19 を
+> 登録する者は居らず、自分の登録が拒否されているだけだが原因は blob 内で追えない。SDP だけが 19 を
+> 広告し続け、辿った Windows は HFP チャネルに着地した (`AT+BRSF=767` を受信)。
+> **採用は TOTA のスロット `RFCOMM_CHANNEL_3` (= 12) / `BTIF_APP_SPP_SERVER_ID_3`**
+> (TOTA ?= 0 で本ビルドに未リンク、出荷実績のある唯一のスロット)。Run 9 で両側
+> `[spplog] init chan=12 setup=0 open=0`。20 番以上の生値を使う案は出荷実績が無いので見送り。
+
 #### 13.1.3 コールバックとスレッドコンテキスト [逆アセ]
 
 コールバックは 2 系統ある (`spp_api.h:75-78`)。
@@ -1982,6 +1990,9 @@ M-T1 の前**とする。比較したのは次の 3 案:
 **discoverable は不要。** 既存ボンド前提なら `BTIF_BAM_CONNECTABLE_ONLY` (page scan のみ) で
 再接続できるはずである。新規ペアリングが必要になった場合に限り、
 一時的に `BTIF_BAM_GENERAL_ACCESSIBLE` (0x03) にする手動手順を用意する (13.7-手順 0)。
+(実装: `spp_log_service.cpp` の再アーム値はマクロ `SPP_LOG_ACCESS_MODE`。
+`make ... SPP_LOG_PAIRING=1` で `install-into-sdk.sh` 手順 11 が Makefile に足した ifeq が
+`GENERAL_ACCESSIBLE` に切り替える。§13.13-4 で実測済み)
 ただし「既存ボンドのデバイスに Windows が発信 COM ポートを作れるか」は 13.2.1 のとおり
 未確証なので **実機確認項目 (13.11-2)**。
 
@@ -2108,6 +2119,13 @@ IBRT の SM は MSS → IBRT 開始のシーケンスを回そうとする。**
 3. 割り当てられた `COMn` を控える
 4. 拾えない場合: デバイスを一度「デバイスの削除」してから再ペアリングし、2 をやり直す
    (13.2.1 のとおり、既存ボンドに後から足したサービスを Windows が拾うかは未確証)
+
+> **実測 (2026-09-01, §13.13):** 手順 0 は「`SPP_LOG_PAIRING=1` で焼いた両バッズをケース内で
+> 同時起動 → `peer ok` 後に `aMode=0x3` → Windows の「デバイスの追加」」で成立した。
+> ペアリングと同時に Windows が SDP の SerialPort サービスから **COM ポートを自動生成**するので
+> 手順 1〜3 は不要だった: `COM6` = 発信 (`{00001101-…}` → `202211338768`)、`COM3` = 着信。
+> `HKLM:\HARDWARE\DEVICEMAP\SERIALCOMM` と `Get-PnpDevice -Class Ports` の InstanceId
+> (`BTHENUM\{00001101-…}_LOCALMFG&001D\…&202211338768_C00000000`) で見分ける。
 
 #### 13.7.2 受信スクリプト
 
@@ -2276,6 +2294,14 @@ write_scan_enable=2
 10. 左バッズ (rank=1) も同時に SPP 接続した場合の挙動 (v1 の範囲外だが、
     Windows が 2 台とも COM ポートを持てるかだけ見ておく)
 
+実測で答えが出たもの (2026-09-01, §13.13): **1** = 既存ボンドのまま COM ポート追加は可能だった
+(Run 9 前、`BusReportedDeviceDesc=PineBudsLog`) が、SDP キャッシュが古いチャネルを指し続けるので
+サービス変更後は削除→再ペアリングが確実。**2** = ボンドがあれば `CONNECTABLE_ONLY` で Windows
+から再接続できる (Run 9 で A2DP が MOBILE_LINK で戻ってきた)。ボンドを消すと discoverable が要る
+(§13.13-4)。**3** = 見える (`PineBudsLog`)。**4** = 払い出されない (`open=1`)。チャネル 12 に変更。
+**5** = 未確定。初回チャンクが丸ごと再送された (§13.13-6) ので、初回 `DATA_SENT` の
+`tx_data_length` が 0 だった可能性あり。**9** = 13 ms (合否条件 6 内)。
+
 ---
 
 ### 13.12 テストリスト (TDD / t-wada スタイル / Red から始める)
@@ -2360,3 +2386,61 @@ $(RINGBIN): tests/test_log_ring.cpp $(RINGSRC) firmware/pinebuds_compute/log_rin
 `TARGET_DIALECT` は既に `-Ifirmware/pinebuds_compute` を持っているので追加の
 include パスは要らない。`spp_log_service.cpp` は SDK ヘッダを使うため
 **ホストではビルドしない** (`mpi_ibrt_glue.cpp` と同じ扱い)。
+
+### 13.13 実機実測 (Run 7〜11, 2026-09-01)
+
+UART キャプチャは `~/.claude/handover/artifacts/2026-09-01-run7-spp-diag/` (Run 7〜9) と
+Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
+`C:\Users\Ryuto\pinebuds-logs\run-20260901-134307.log`。
+
+1. **スロット (Run 7/8 → 9)。** チャネル 19 / ID_10 は `open=1` (§13.1.2 の注記)。
+   `RFCOMM_CHANNEL_3` / `SERVER_ID_3` に変更した Run 9 で両側 `open=0`。`portType` を
+   `service_setup` の前に設定する順序変更 (SDK の `app_spp_open` と同順) は単独では効果なし。
+2. **再アームは効く (Run 9)。** `[mpi] peer ok` 直後に `set_access_mode=2, ca=0xc08d1df`
+   (再アーム) → `[BTEVENT] ACCESSIBLE_CHANGE aMode=0x2` → Windows が A2DP を
+   `j_scan=CONNECTED, l_type=MOBILE_LINK` で再接続してきた。以後 SDK が `mode=0x0` に戻すたび
+   再アームが 2 を再主張する (7 回)。
+3. **満充電シャットダウン。** `FULL_CHARGING:42xx → app_shutdown → system_shutdown!!` が
+   毎起動 15〜60 秒で来る (Run 9: `peer ok` の 15 秒後)。音楽再生では減らない。
+   `install-into-sdk.sh` 手順 10 で `apps/battery/app_battery.cpp` の `app_shutdown()` を
+   `if (0)` 化。パッチ後は `FULL_CHARGING:4227` / `EXT PIN-->FULL_CHARGING` が出ても走り続ける
+   (左で 20 分以上観測)。副作用: シャットダウン保留が無くなるため「出して 3 秒待って戻す」で
+   **再起動しないことがある** (右: 充電端子の `PLUGIN` だけ出て `CHARGING PWRON` 無し。
+   左は同じ操作で再起動した)。原因未特定。書き込み前の再起動手順に影響するので要観察。
+4. **ペアリングし直し。** Windows でデバイスを削除すると再ペアリングできなくなる: バッズは
+   PC のリンクキーを持ったまま page するだけで inquiry scan を出さず、再アームも 0x2 に固定する。
+   純正の「ケース外でペアリングモード」は充電起動バッズが取り出しで落ちるので使えない。
+   手順 11 の `SPP_LOG_PAIRING=1` ビルド (逆アセで `cmp r3,#3 / movs r0,#3` を確認) を
+   焼くと `peer ok` 後に `aMode=0x3`、Windows の「デバイスの追加」で `PineBuds Pro`
+   (`DEV_202211338768`) がペアリングでき、COM3/COM6 が自動生成された (§13.7.1 の注記)。
+   discoverable になるのは `peer ok` 後だけなので、**左右同時起動で TWS が組めること**が前提。
+5. **受信成功 (Run 11, 13:43)。** `spp_tail.py COM6` を開くと 1 秒強で RFCOMM が張られ、
+   右バッズ (rank 0) のリング全量 `#0`〜`#25` が届いた:
+   `#23 GEMM-MPI N=32 rank=0 size=2 checksum=32768.000000 expect=32768.000000 PASS`、
+   `#24 GEMM-MPI elapsed=13 ms frames tx=2 rx=4 err=0`、`#25 [mpi] finalize done rank=0`。
+   COM6 を閉じて再オープンすると 1.3 秒で接続・受信 0 バイト (リングは commit 済み)。
+6. **初回チャンクの重複。** 受信ファイルの先頭 12 行 (`#0`〜`#11 [mpi-t1]` の途中、≈512 B =
+   `kSppLogChunk` 1 個分) の直後に `#0` から全量が再送され、`spp_tail.py` が
+   `!! GAP 11 -> 1` を記録した。以降は重複も欠落も無い。commit されずに再送されたのは
+   初回チャンクだけなので、候補は (a) Windows の COM オープン時に RFCOMM が一度切れて
+   繋ぎ直され `CONNECTED` で `s_inflight=0` に戻った (再送は設計どおりの at-least-once)、
+   (b) 初回 `DATA_SENT` の `tx_data_length` が 0 だった (§13.11-5)。右 UART が本 Run で
+   無反応だったため `[spplog] connected` の回数で切り分けられなかった。**未解決。**
+7. **§13.9 判定。** 1: Windows 側 ✓ / UART `[spplog] connected` は右 UART 不通で未観測。
+   2: Windows 側の行は全て `COMPUTE_TRACE` 由来で SDK の TRACE は混入なし ✓、UART との
+   集合比較は右 UART 不通で未実施。3 ✓。4: `#- [log] dropped=` 0 回 ✓、`!! GAP` 1 回
+   (6 の重複由来、欠落ではない) △。5: 左 `cmd_code:8201` 失敗 0 回・`size=2`・
+   `finalize done rank=1` ✓、右は SPP 側の行で `size=2`・`finalize done rank=0` ✓。
+   6: 13 ms ✓。7: 未計測。
+8. **その他の観測。** `[mpi-t1] probe len=64 以上 TIMEOUT`、`max_payload=4` (右) / `0` (左) は
+   Run 9 以前から同じで GEMM-MPI は完走する。左の `[mpi] FAIL stalled in MPI op >5000 ms rank=1`
+   は `peer ok` 直後のプローブ試験中の警告で旧ファームでも出ていた。退行ではない。
+   右 UART (ACM0) は本 Run で受信がほぼ途絶 (bestool も boot sync は受かるが ack が届かない) —
+   接触不良の再発。抜き差しで復活した前例あり。
+9. **Windows 側の落とし穴。** WSL から `timeout N powershell.exe ... python spp_tail.py` を
+   打つと WSL 側の powershell だけ死に **Windows の python.exe が COM を掴んだまま残る**
+   (`PermissionError(13, ..., 5)` = `ERROR_ACCESS_DENIED`)。
+   `Get-CimInstance Win32_Process | ? CommandLine -match spp_tail | Stop-Process` で回収する。
+   COM オープン失敗の読み方: `FILE_NOT_FOUND` = Windows ローカル (ポート再作成)、
+   `REM_NOT_LIST` = 相手不在 (バッズ電源断)、`ACCESS_DENIED` = 別プロセスが掴んでいる、
+   open 成功 + `AT+BRSF` = HFP 着地 (サーバ不在 / SDP キャッシュが古い)。
