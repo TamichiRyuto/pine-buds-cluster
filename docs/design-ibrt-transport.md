@@ -2832,8 +2832,45 @@ pthread MPI ハーネスで 2 ランクが同時に parallel 領域へ入るテ�
   書き込み完了後に握手が成功して size=2 で完走した
 - 未達: タイムアウト経路 (`[omp] FAIL worker timeout`) は発生しなかったので未確認
 
-次の一手 (未着手): 比較ランの間 TWS リンクを sniff から外す (ラン前に exit sniff を要求する、
-または 3 モードを 1 回の START で連続させず各モードの前に相手と同期する) と、mpi / mpi+omp の
-elapsed がリンク遅延ではなく計算を映すようになる。1 バッズ 2 コアだけの `omp` モードを 4 つ目
-として足すのも安価 (`mpi_ibrt_install_seams(0,1)` + `omp_set_num_threads(2)`)。
+次の一手 → §15.7 (sniff 外し) と §15.2-6 の `omp` モード追加として実施 (2026-09-01、Run 17 で計測)。
+
+### 15.7 比較ランの前に TWS リンクを sniff から外す (2026-09-01)
+
+§15.6 の結論「mpi / mpi+omp の elapsed は sniff 復帰 (~300 ms) に支配される」への対処。
+
+**SDK 側の事実** (external/OpenPineBuds):
+
+- `ibrt_ctrl_t::tws_mode` (`ibrt_link_mode_e` = uint8_t、services/ibrt_core/inc/app_tws_ibrt.h:245) が
+  TWS ACL リンクの現在モード。`IBRT_ACTIVE_MODE 0x00` / `IBRT_SNIFF_MODE 0x02` (同 :74-76)。
+  ibrt_core はプリビルト lib (`services/ibrt_core/lib/libtws_ibrt_enhanced_stack_*.a`) で、HCI の
+  mode-change イベントでこのフィールドを更新する (`app_tws_ibrt_sniff_callback`、同 :324)
+- `bt_status_t app_tws_ibrt_exit_sniff_with_tws(void)` (同 :314、lib 実装)。SDK 自身の呼び方は
+  2 箇所とも `if (p_ibrt_ctrl->tws_mode == IBRT_SNIFF_MODE)` を guard に呼ぶだけで、戻り値も完了も
+  見ない: services/app_ibrt/src/app_ibrt_if.cpp:815 (3 s 周期の sniff checker、mobile 接続中に
+  sniff を禁止する用途) と app_ibrt_voice_report.cpp:185 (master が voice report 開始コマンドを
+  `tws_ctrl_send_cmd` で送る直前)。後者はまさに「TWS コマンドを低遅延で届けたいから先に起こす」
+  という本件と同じ使い方
+- 完了は `tws_mode == IBRT_ACTIVE_MODE` で観測できる (app_ibrt_if.cpp:612 が同じ条件で判定)。
+  `w4_tws_exit_sniff` (同 :269) は lib 内部の待ちフラグなので参照しない
+- ACTIVE 判定の別名 `BTIF_BLM_ACTIVE_MODE` (app_ibrt_rssi.cpp:237) もあるが値は同じ 0
+
+**設計**:
+
+1. `mpi_ibrt_exit_tws_sniff(size)`: `size == 2` かつ `app_tws_ibrt_tws_link_connected()` のときだけ。
+   `tws_mode != ACTIVE` なら `app_tws_ibrt_exit_sniff_with_tws()` を 1 回呼び、`tws_mode == ACTIVE`
+   になるまで 10 ms ポーリング (上限 1000 ms。実測復帰 ~300 ms の 3 倍)。結果を
+   `[mpi] tws sniff exit: was=%u now=%u rc=%d after %u ms ok|TIMEOUT` の 1 行で出す。
+   TIMEOUT でも比較ランは続ける (elapsed が悪くなるだけで正しさは変わらない)
+2. 呼ぶ場所は `mpi_ibrt_run_compare` の冒頭 — 起動時ランと 5 連タップの両方に効く。
+   **両側が呼ぶ**: HCI exit sniff は同じ ACL リンクへの要求で、SDK の sniff checker も役割を
+   問わず呼んでいる。相手が先に起こしていれば自分は `was=0` で即 ok
+3. 両側が ACTIVE を確認してから最初の `mpi` モードの Allreduce に入るので、「片側だけ sniff の
+   まま」で交換が始まることはない。片側が待っている間に再 sniff する可能性は、sniff に落ちるまでの
+   idle 時間 (秒単位) が 4 モード合計 (~10 ms + 起動時でも 100 ms 級) より長いので無視する
+4. 縮退 (size 1) と `omp` / `single` モードには関係しない (リンクを使わない)
+
+**実機確認項目** (Run 17): `[mpi] tws sniff exit … ok` が両側に出る (was=2 → now=0 が典型、
+起動時直後は was=0)、`mpi+omp elapsed` が 313 ms → 数 ms 台、`mpi` が 3.7 ms 前後で安定、
+4 モード PASS。TIMEOUT が出たら §15.6 と同じ数字に戻るはず (対処: 上限延長か、lib が要求を
+落とす条件の調査)。
 

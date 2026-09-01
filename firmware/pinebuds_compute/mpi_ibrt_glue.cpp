@@ -560,6 +560,38 @@ void mpi_ibrt_speedup_parts(unsigned base_us, unsigned mode_us, int *whole,
 
 void mpi_ibrt_install_seams(int rank, int size);  // defined below
 
+// Design §15.7: take the TWS link out of sniff before the compare run, so
+// the collective modes measure computation plus one active-mode
+// round-trip rather than the ~300 ms sniff exit (§15.6). Same guard and
+// call the SDK itself uses (app_ibrt_if.cpp:815 sniff checker,
+// app_ibrt_voice_report.cpp:185); unlike those we then wait for the mode
+// to actually read back as active, because the very next thing we do is
+// an Allreduce over the link. A timeout is reported but not fatal: the
+// run still passes, only the elapsed figures degrade.
+const unsigned kSniffExitPollMs = 10;
+const unsigned kSniffExitTimeoutMs = 1000;
+
+void mpi_ibrt_exit_tws_sniff(int size) {
+    if (size < 2 || !app_tws_ibrt_tws_link_connected()) {
+        return;
+    }
+    ibrt_ctrl_t *ctrl = app_tws_ibrt_get_bt_ctrl_ctx();
+    unsigned was = ctrl->tws_mode;
+    int rc = 0;
+    unsigned waited_ms = 0;
+    if (was != IBRT_ACTIVE_MODE) {
+        rc = (int)app_tws_ibrt_exit_sniff_with_tws();
+        while (ctrl->tws_mode != IBRT_ACTIVE_MODE &&
+               waited_ms < kSniffExitTimeoutMs) {
+            osDelay(kSniffExitPollMs);
+            waited_ms += kSniffExitPollMs;
+        }
+    }
+    COMPUTE_TRACE(5, "[mpi] tws sniff exit: was=%u now=%u rc=%d after %u ms %s",
+                  was, (unsigned)ctrl->tws_mode, rc, waited_ms,
+                  (ctrl->tws_mode == IBRT_ACTIVE_MODE) ? "ok" : "TIMEOUT");
+}
+
 // Separate the CP's share of a forked mode's time from the TWS link: the
 // region itself is only these two numbers, everything else in the elapsed
 // figure is Allreduce over the link (nothing, for the local omp mode).
@@ -575,6 +607,8 @@ void mpi_ibrt_trace_last_region(const char *mode) {
 }
 
 void mpi_ibrt_run_compare(int rank, int size) {
+    mpi_ibrt_exit_tws_sniff(size);
+
     mpi_ibrt_install_seams(rank, size);
     omp_set_num_threads(1);
     mt3_result r_mpi = mpi_ibrt_run_mt3(rank, size, "mpi");

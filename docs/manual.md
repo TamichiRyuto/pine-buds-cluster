@@ -184,6 +184,7 @@ scripts/spp_latency/com_kill.sh
 
 ```
 [omp] cp open ok after 3 ms                                  ← 起動時に CP を開いた
+[mpi] tws sniff exit: was=2 now=0 rc=0 after 300 ms ok       ← ラン前に TWS を sniff から起こした (§15.7、Run 17 から)
 GEMM-MPI mode=mpi N=32 rank=0 size=2 threads=1 checksum=32768.000000 expect=32768.000000 PASS
 GEMM-MPI mode=mpi elapsed=3683 us frames tx=1 rx=0 err=0
 GEMM-MPI mode=mpi+omp N=32 rank=0 size=2 threads=2 checksum=... PASS
@@ -213,6 +214,9 @@ GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 omp=xN.NN worker_on_cp
   リンクを使わない `omp` の elapsed と single の比 (`speedup … omp=`) で読む。`[omp] last region`
   は並列領域だけの内訳 (実測: mpi+omp で 1226 us vs single 3783 us、§15.6)
 - 起動時ランはクロックを上げる前に走るので single が 15 ms 前後、タップ時は 3.8 ms 前後
+- `[mpi] tws sniff exit` は size=2 のときだけ出る。`was=0` はリンクが既に active だった (待ち 0 ms)、
+  `TIMEOUT` は 1 s 待っても active に戻らなかった — その場合 `mpi` / `mpi+omp` の elapsed は
+  Run 16 と同じく数百 ms に戻る (design doc §15.7)
 
 ## 5. UART の見方
 
