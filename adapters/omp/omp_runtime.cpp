@@ -20,6 +20,11 @@ namespace {
     // OpenMP nthreads-var: 0 means unset (falls back to capacity).
     int g_nthreads_var = 0;
 
+    // Nesting depth of GOMP_parallel calls currently in flight. libgomp's
+    // default nested=false means any region opened while g_depth > 0 must
+    // run as a team of one, inline, without touching the port at all.
+    int g_depth = 0;
+
     int capacity(void) {
         return 1 + (g_port ? g_port->worker_count() : 0);
     }
@@ -69,22 +74,39 @@ extern "C" void GOMP_parallel(void (*fn)(void *), void *data,
                                unsigned num_threads, unsigned flags) {
     (void)flags;
 
+    if (g_depth > 0) {
+        // Nested region: default nested=false -> team of one, inline,
+        // no port interaction. Save/restore the outer team state so the
+        // caller sees its own team size and thread id again on return.
+        int saved_team_size = g_team_size;
+        g_team_size = 1;
+        ++g_depth;
+        fn(data);
+        --g_depth;
+        g_team_size = saved_team_size;
+        return;
+    }
+
     int requested = (num_threads > 0) ? (int)num_threads : omp_get_max_threads();
     int team = min_int(requested, capacity());
 
+    ++g_depth;
     if (team >= 2) {
         g_team_size = 2;
         if (g_port->worker_start(fn, data) == 0) {
             fn(data);
             g_port->worker_join();
             g_team_size = 1;
+            --g_depth;
             return;
         }
         g_team_size = 1;
         fn(data);
+        --g_depth;
         return;
     }
 
     g_team_size = 1;
     fn(data);
+    --g_depth;
 }

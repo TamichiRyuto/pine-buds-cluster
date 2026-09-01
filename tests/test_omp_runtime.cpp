@@ -22,7 +22,7 @@
 //        0 / negative -> ignored
 // [x] R5 num_threads argument overrides nthreads-var (1 -> sequential,
 //        2 -> team of 2)
-// [ ] R6 worker_start failure -> sequential fallback, no join
+// [x] R6 worker_start failure -> sequential fallback, no join
 // [ ] R7 nested region runs inline with 1 thread / id 0; outer restored
 // [ ] R8 after the region: 1 thread / id 0; omp_set_port(NULL) -> max 1
 
@@ -99,8 +99,6 @@ void install_fake_port() {
     g_fake.join_seen_calls = -1;
     omp_set_port(&g_fake_port);
 }
-
-}  // namespace
 
 static void test_sequential_identity() {
     CHECK(omp_get_num_threads() == 1);
@@ -256,6 +254,61 @@ static void test_r6_worker_start_failure_falls_back_to_sequential() {
     omp_set_port(0);
 }
 
+// Outer region body that opens a nested region and records what both the
+// inner body and the outer body (after the inner returned) observed.
+struct Nested {
+    int inner_calls;
+    int inner_num_threads;
+    int inner_thread_num;
+    int outer_after_num_threads[2];
+    int outer_after_thread_num[2];
+    int outer_calls;
+};
+Nested g_nested;
+
+void inner_fn(void *data) {
+    (void)data;
+    ++g_nested.inner_calls;
+    g_nested.inner_num_threads = omp_get_num_threads();
+    g_nested.inner_thread_num = omp_get_thread_num();
+}
+
+void outer_fn(void *data) {
+    int me = omp_get_thread_num();
+    GOMP_parallel(&inner_fn, data, 0, 0);
+    int i = g_nested.outer_calls++;
+    if (i < 2) {
+        g_nested.outer_after_num_threads[i] = omp_get_num_threads();
+        g_nested.outer_after_thread_num[i] = me == omp_get_thread_num() ? me : -1;
+    }
+}
+
+}  // namespace
+
+static void test_r7_nested_region_runs_inline_as_one_thread() {
+    install_fake_port();
+    g_nested = Nested();
+    int payload = 0;
+
+    GOMP_parallel(&outer_fn, &payload, 0, 0);
+
+    // Outer forked a team of 2 (fake worker first, then primary); each
+    // member opened a nested region that ran inline as a team of one.
+    CHECK(g_fake.starts == 1);
+    CHECK(g_nested.outer_calls == 2);
+    CHECK(g_nested.inner_calls == 2);
+    CHECK(g_nested.inner_num_threads == 1);
+    CHECK(g_nested.inner_thread_num == 0);
+    // Back in the outer region the team of 2 and each member's id are
+    // intact (worker call 0 -> id 1, primary call 1 -> id 0).
+    CHECK(g_nested.outer_after_num_threads[0] == 2);
+    CHECK(g_nested.outer_after_num_threads[1] == 2);
+    CHECK(g_nested.outer_after_thread_num[0] == 1);
+    CHECK(g_nested.outer_after_thread_num[1] == 0);
+
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
@@ -266,5 +319,6 @@ int main() {
     RUN_TEST(test_r4_set_num_threads_clamps_to_capacity);
     RUN_TEST(test_r5_num_threads_argument_overrides_nthreads_var);
     RUN_TEST(test_r6_worker_start_failure_falls_back_to_sequential);
+    RUN_TEST(test_r7_nested_region_runs_inline_as_one_thread);
     return testfw::summary();
 }
