@@ -13,7 +13,7 @@
 // [x] omp_get_max_threads / omp_get_num_procs return 1
 // [x] omp_set_num_threads is accepted and ignored (still 1 thread)
 // [x] omp_get_wtime: monotonic non-negative seconds
-// [ ] R1 no port: GOMP_parallel runs fn(data) once inline, 1 thread / id 0
+// [x] R1 no port: GOMP_parallel runs fn(data) once inline, 1 thread / id 0
 // [ ] R2 port (worker_count 1): max_threads 2, num_procs 2, outside a
 //        region num_threads is still 1
 // [ ] R3 team of 2: fn runs twice (worker + inline), worker sees id 1,
@@ -60,6 +60,46 @@ void record_fn(void *data) {
     }
 }
 
+// Fake port: records calls, runs the worker's fn synchronously inside
+// worker_start with self_is_worker reporting 1 for that call only.
+struct FakePort {
+    int starts;
+    int joins;
+    int start_rc;      // what worker_start returns
+    int in_worker;     // 1 while running fn on behalf of the "worker"
+    int join_seen_calls;  // g_seen.calls at the moment of worker_join
+};
+FakePort g_fake;
+
+int fake_worker_count() { return 1; }
+int fake_worker_start(void (*fn)(void *), void *data) {
+    ++g_fake.starts;
+    if (g_fake.start_rc != 0) {
+        return g_fake.start_rc;
+    }
+    g_fake.in_worker = 1;
+    fn(data);
+    g_fake.in_worker = 0;
+    return 0;
+}
+void fake_worker_join() {
+    ++g_fake.joins;
+    g_fake.join_seen_calls = g_seen.calls;
+}
+int fake_self_is_worker() { return g_fake.in_worker; }
+
+const omp_port g_fake_port = {&fake_worker_count, &fake_worker_start,
+                              &fake_worker_join, &fake_self_is_worker};
+
+void install_fake_port() {
+    g_fake.starts = 0;
+    g_fake.joins = 0;
+    g_fake.start_rc = 0;
+    g_fake.in_worker = 0;
+    g_fake.join_seen_calls = -1;
+    omp_set_port(&g_fake_port);
+}
+
 }  // namespace
 
 static void test_sequential_identity() {
@@ -99,10 +139,23 @@ static void test_r1_no_port_runs_inline_once() {
     CHECK(g_seen.thread_num[0] == 0);
 }
 
+static void test_r2_port_reports_two_threads_available() {
+    install_fake_port();
+
+    CHECK(omp_get_max_threads() == 2);
+    CHECK(omp_get_num_procs() == 2);
+    // Outside a parallel region there is still only the primary thread.
+    CHECK(omp_get_num_threads() == 1);
+    CHECK(omp_get_thread_num() == 0);
+
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
     RUN_TEST(test_wtime_monotonic);
     RUN_TEST(test_r1_no_port_runs_inline_once);
+    RUN_TEST(test_r2_port_reports_two_threads_available);
     return testfw::summary();
 }
