@@ -2734,24 +2734,24 @@ WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォ
 R9 は `-fopenmp` でコンパイルした無改変 bench + pthread port (`tests/omp_thread_port.h`、
 `mpi_thread_port.h` と同じホスト専用ハーネス)。
 
-- [ ] **R1 port 無し**: `GOMP_parallel(fn, data, 0, 0)` は fn を data 付きで 1 回 inline で呼び、
+- [x] **R1 port 無し**: `GOMP_parallel(fn, data, 0, 0)` は fn を data 付きで 1 回 inline で呼び、
       中で `omp_get_num_threads()==1` / `omp_get_thread_num()==0`
-- [ ] **R2 port あり** (worker_count=1): `omp_get_max_threads()==2`、`omp_get_num_procs()==2`、
+- [x] **R2 port あり** (worker_count=1): `omp_get_max_threads()==2`、`omp_get_num_procs()==2`、
       領域外の `omp_get_num_threads()==1`
-- [ ] **R3 チーム 2**: `GOMP_parallel` で fn が計 2 回 (worker 側 1 回 + inline 1 回)。worker 側は
+- [x] **R3 チーム 2**: `GOMP_parallel` で fn が計 2 回 (worker 側 1 回 + inline 1 回)。worker 側は
       `thread_num==1`、inline 側は 0、両方 `num_threads==2`。`worker_join` は inline 実行の後に
       ちょうど 1 回
-- [ ] **R4 omp_set_num_threads**: (1) → `worker_start` は呼ばれず fn 1 回、`num_threads==1`。
+- [x] **R4 omp_set_num_threads**: (1) → `worker_start` は呼ばれず fn 1 回、`num_threads==1`。
       (5) → 2 に丸める。(0) / 負 → 無視 (直前の値のまま)
-- [ ] **R5 num_threads 節**: `GOMP_parallel(..., 1, 0)` は port ありでも逐次、`(..., 2, 0)` は
+- [x] **R5 num_threads 節**: `GOMP_parallel(..., 1, 0)` は port ありでも逐次、`(..., 2, 0)` は
       `omp_set_num_threads(1)` 後でもチーム 2
-- [ ] **R6 worker_start 失敗**: 逐次フォールバック (fn 1 回 inline、`num_threads==1`、
+- [x] **R6 worker_start 失敗**: 逐次フォールバック (fn 1 回 inline、`num_threads==1`、
       `worker_join` は呼ばれない)
-- [ ] **R7 ネスト**: 領域内から `GOMP_parallel` → 内側は inline 1 回で `num_threads==1` /
+- [x] **R7 ネスト**: 領域内から `GOMP_parallel` → 内側は inline 1 回で `num_threads==1` /
       `thread_num==0`。内側から戻った外側は `num_threads==2` / 元の番号のまま
-- [ ] **R8 後始末**: 領域終了後 `num_threads==1` / `thread_num==0`。`omp_set_port(NULL)` で
+- [x] **R8 後始末**: 領域終了後 `num_threads==1` / `thread_num==0`。`omp_set_port(NULL)` で
       `max_threads==1` に戻る
-- [ ] **R9 統合**: `-fopenmp` の bench + pthread port、size 1、2 スレッドで
+- [x] **R9 統合**: `-fopenmp` の bench + pthread port、size 1、2 スレッドで
       `gemm_bench_run(8)` → checksum 512、worker が 1 回呼ばれた
 - 既存 3 テスト (逐次の恒等性 / 容量 1 / wtime 単調) は port 無しの振る舞いとして残す
 
