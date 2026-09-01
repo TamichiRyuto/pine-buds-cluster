@@ -2641,3 +2641,145 @@ WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォ
   §13.14 (SDK の `NEW_OPEN`/`OPEN` が両方 CONNECTED になる。初回チャンク重複と同根)
 - 書き込み直後の単独起動 (左) は `FAIL cmd channel down after 20000 ms` → `size=1` の縮退ランで
   完走した。同時再起動後は正常
+
+## 15. ノード内 2 コア並列 — OpenMP Stage 2 を cp_accel に載せる (2026-09-01)
+
+§14 までは各バッズ 1 コア (MCU 側 M4F) だけで計算していた。HANDOVER の上位ゴール
+「ノード内は OpenMP 相当の 2 コア並列」を、**無改変の `bench/gemm_mpi_omp.cpp` の
+`#pragma omp parallel for` が第 2 コア (CP) で半分の行を計算する**形で実現する。
+併せて、5 連タップのランを「MPI+OpenMP / MPI 単体 / シングル」の 3 モード比較にし、
+シングルコア 1 バッズに対する速度向上率を PC (COM6) で読めるようにする。
+
+方針は「車輪の再発明をしない」: コア間機構は SDK の `cp_accel`、並列化は GCC の
+`-fopenmp` によるアウトライン化、結果表示は既存の seam と整形ヘルパをそのまま使う。
+
+### 15.1 SDK 側の事実 (2026-09-01 調査)
+
+- `CHIP_HAS_CP := 1` (`config/common.mk:424`, best2300p)。CP 用 RAM は
+  `RAMCP` = RAMRET 上位 128 KB − 0x20 (data/bss/スタック)、`RAMCPX` = RAM6 の 96 KB (コード)
+  (`plat_addr_map_best2300p.h:53-64`)。`A2DP_CP_ACCEL=1` なので open_source ビルドでも
+  既に予約済みで、MCU の `RAM_SIZE` はその手前で切れている
+- cp_accel API (`services/cp_accel/cp_accel.{h,c}`): `cp_accel_open(task_id, desc)` が初回に
+  `hal_cmu_cp_enable(RAMCP_TOP, accel_main)` で CP を起動。CP は `accel_loop` で `__WFI` し、
+  MCU からの `cp_accel_send_event_mcu2cp(CP_BUILD_ID(task, evt))` で起きて
+  `desc->cp_work_main(evt)` を `LOCK_CP_PROCESS` (memsc) 下で呼ぶ。CP→MCU は
+  `cp_accel_send_event_cp2mcu(id)` → MCU 側 `desc->mcu_evt_hdlr` (mcu2cp IRQ 文脈)
+- タスクスロット: `CP_TASK_A2DP_DECODE`(0) / `CP_TASK_SCO`(1) は再生・通話中に使用、
+  `CP_TASK_AEC`(2) は app_ai (このビルドには無い)、**`CP_TASK_HW`(3) は未使用** → これを使う
+- **CP は flash にアクセスできない**: `cp_accel.c:206` の MPU テーブルが FLASH/FLASHX/FLASH_NC を
+  `NO_ACCESS` にする。CP で走るコードは `.cp_text_sram` に置く必要があり、方法は
+  `CP_TEXT_SRAM_LOC` 属性か、lds の `*:cp_queue.o(.text*)` 形式のオブジェクト単位指定
+  (`scripts/link/best1000.lds.S:767-777`)。flash → RAMCPX のコピーは **CP の初回起動時にしか
+  行われない** (`system_cp_init(load_code)`, `platform/cmsis/system_cp.c:206-212`)。
+  従って MCU がその領域の関数を呼べるのは CP を一度 open した後だけ
+- CP の FPU は `system_cp.c:98` で CPACR を有効化している。float 演算可
+- SRAM は両コアからキャッシュ無しで見える (CP の cache は flash バス用)。
+  `a2dp_decoder_cp.c` も共有バッファに cache 操作をしていない
+- コンパイル: `-ffunction-sections -fdata-sections`、`-mfloat-abi=hard -mfpu=fpv4-sp-d16`、
+  DEBUG=1 で `-fstack-protector-strong`。オブジェクト単位のフラグは `CFLAGS_<base>.o`
+  (`scripts/lib.mk:138`、C++ にも効く)。`_OPENMP` を見る SDK コードは無い
+- µs タイマ: `hal_fast_sys_timer_get()` + `FAST_TICKS_TO_US` (水晶 26 MHz / 4 = 6.5 MHz、
+  `hal_timer.h:138-157`)。現行の `MPI_Wtime` は `GET_CURRENT_MS` の ms 精度で、N=32 の
+  GEMM (数 ms) を比べるには粗い
+- GCC が `#pragma omp parallel for` (static schedule) に要求するランタイムはホスト g++ 11 の
+  `-fopenmp -O0 -S` で実測: **`GOMP_parallel(fn, data, num_threads, flags)`** と、アウトライン
+  関数 `<parent>._omp_fn.0` 内からの **`omp_get_num_threads()` / `omp_get_thread_num()`** のみ。
+  バリア呼び出しは出ない (領域終端の暗黙バリアは GOMP_parallel の戻りに畳まれる)
+
+### 15.2 設計
+
+1. **並列化は GCC に任せる**: `bench/gemm_mpi_omp.cpp` は無改変のまま、apps/main/Makefile に
+   `CFLAGS_gemm_mpi_omp.o += -fopenmp` (このオブジェクトだけ。link には付けないので
+   `-lgomp` は要求されない)。`<omp.h>` は既存の `-Iapps/main` で自前ヘッダが先に解決される
+2. **ランタイム `adapters/omp/omp_runtime.cpp`** (旧 `omp_stub.cpp` をリネーム、gnu++98):
+   libgomp と同じ ABI で上記 3 エントリだけ実装する。libgomp 本体は pthread/futex 前提で
+   cp_accel への移植が存在しないため採用しない (同じソースが本物の libgomp で正しいことは
+   `scripts/golden-check.sh` が担保)。チームは最大 2 (primary + worker 1)。
+   port seam `omp_port { worker_count, worker_start(fn, data), worker_join, self_is_worker }` を
+   `mpi_adapter_port` と同じ流儀で `omp_set_port` から差し、NULL なら Stage-1 と同じ逐次。
+   `omp_set_num_threads` は `[1, 1 + worker_count]` に丸め、`GOMP_parallel` の `num_threads`
+   引数 (num_threads 節) はそれより優先。ネストした領域は 1 スレッドで inline 実行
+   (libgomp の既定 `nested=false` と同じ)。`worker_start` が失敗したら逐次にフォールバック
+3. **ターゲット port `firmware/pinebuds_compute/omp_cp_port.cpp`**: `CP_TASK_HW` の desc
+   `{ cp_work_main: 共有変数の fn(data) を呼び done=1 → cp2mcu イベント,
+   mcu_evt_hdlr: セマフォ解放 }`。`worker_start` = fn/data を共有変数に置いて
+   `cp_accel_send_event_mcu2cp`、`worker_join` = セマフォ待ち (1000 ms タイムアウト、
+   フォールバックで volatile `done` を確認)、`self_is_worker` = **SP が RAMCP 範囲内か**
+   (CP は `accel_main` の MSP = RAMCP_TOP 直下、MCU のスレッドスタックは通常 RAM)。
+   CP は compute スレッド起動時に一度 open して開いたままにする (待機は WFI。close すると
+   次の open で data/bss は再初期化されるがコードは再コピーされないので、開閉の状態機械を
+   持ち込まない方が安全)
+4. **配置**: install スクリプトが lds の `.cp_text_sram` に `*:gemm_mpi_omp.o(.text*)` を
+   足す (SDK の `*:cp_queue.o` と同じ書式)。これで `gemm_bench_run` とそのアウトライン関数が
+   まとめて CP から実行可能になる (MCU 側も RAMCPX から実行するが、CP open 後なので
+   コピー済み)。`omp_runtime` の 3 関数と port の `self_is_worker` は `OMP_CP_TEXT`
+   (ターゲットで `CP_TEXT_SRAM_LOC`、ホストで空) を付ける。データ (`g_a/g_b/g_c`、
+   ランタイム状態、GOMP が渡す `data` 構造体 = MCU スレッドのスタック) は全て通常 RAM で
+   両コアから見える
+5. **計測**: `mpi_ibrt_wtime` を fast timer (µs) に変える (既存 seam `mpi_adapter_set_wtime`
+   のまま)。ラン本体は変えず `MPI_Wtime()` 差分を µs で出す
+6. **3 モード比較ラン** (起動時・5 連タップとも): 順序は **mpi → mpi+omp → single**。
+   mpi / mpi+omp は現行 seams (rank, size) で `omp_set_num_threads(1)` /
+   `omp_set_num_threads(omp_get_max_threads())`、single は `mpi_ibrt_install_seams(0, 1)` で
+   両バッズがローカルに走る。集団通信を先に、ローカルを最後にするので相手の seams 状態と
+   食い違わない。各モードは既存の `GEMM-MPI …` 行を `mode=` 付きで出し、rank 0 が最後に
+   `GEMM-CMP N=32 size=%d single=%u us mpi=%u us mpiomp=%u us speedup mpi=x%d.%02d mpiomp=x%d.%02d PASS|FAIL`
+   を出す。速度向上率 = single / mode を float で計算し `mpi_ibrt_float_to_parts` で表示。
+   縮退 (size 1) では mpi はシングル相当になる (`size=1` で判別)。COM6 に届くのは master 側の
+   リングだけという §13.14-4 の制約はそのまま
+
+### 15.3 テストリスト (ホスト / t-wada スタイル / Red から始める)
+
+`tests/test_omp_runtime.cpp` (旧 `test_omp_stub.cpp`)。R1〜R8 は呼び出しを記録する fake port、
+R9 は `-fopenmp` でコンパイルした無改変 bench + pthread port (`tests/omp_thread_port.h`、
+`mpi_thread_port.h` と同じホスト専用ハーネス)。
+
+- [ ] **R1 port 無し**: `GOMP_parallel(fn, data, 0, 0)` は fn を data 付きで 1 回 inline で呼び、
+      中で `omp_get_num_threads()==1` / `omp_get_thread_num()==0`
+- [ ] **R2 port あり** (worker_count=1): `omp_get_max_threads()==2`、`omp_get_num_procs()==2`、
+      領域外の `omp_get_num_threads()==1`
+- [ ] **R3 チーム 2**: `GOMP_parallel` で fn が計 2 回 (worker 側 1 回 + inline 1 回)。worker 側は
+      `thread_num==1`、inline 側は 0、両方 `num_threads==2`。`worker_join` は inline 実行の後に
+      ちょうど 1 回
+- [ ] **R4 omp_set_num_threads**: (1) → `worker_start` は呼ばれず fn 1 回、`num_threads==1`。
+      (5) → 2 に丸める。(0) / 負 → 無視 (直前の値のまま)
+- [ ] **R5 num_threads 節**: `GOMP_parallel(..., 1, 0)` は port ありでも逐次、`(..., 2, 0)` は
+      `omp_set_num_threads(1)` 後でもチーム 2
+- [ ] **R6 worker_start 失敗**: 逐次フォールバック (fn 1 回 inline、`num_threads==1`、
+      `worker_join` は呼ばれない)
+- [ ] **R7 ネスト**: 領域内から `GOMP_parallel` → 内側は inline 1 回で `num_threads==1` /
+      `thread_num==0`。内側から戻った外側は `num_threads==2` / 元の番号のまま
+- [ ] **R8 後始末**: 領域終了後 `num_threads==1` / `thread_num==0`。`omp_set_port(NULL)` で
+      `max_threads==1` に戻る
+- [ ] **R9 統合**: `-fopenmp` の bench + pthread port、size 1、2 スレッドで
+      `gemm_bench_run(8)` → checksum 512、worker が 1 回呼ばれた
+- 既存 3 テスト (逐次の恒等性 / 容量 1 / wtime 単調) は port 無しの振る舞いとして残す
+
+ホスト側の制約: ランタイムのチーム状態はグローバル 1 つ (ターゲットは 1 バッズ 1 ランク)。
+pthread MPI ハーネスで 2 ランクが同時に parallel 領域へ入るテストは書かない
+(`test_gemm_bench` の 2 ランクケースは threads=1 のまま)。
+
+### 15.4 実機確認項目 (ホストテスト対象外)
+
+- arm-none-eabi-g++ 9 が `-fopenmp` を受理し、`GOMP_parallel` を `omp_runtime` が供給して link
+  できること
+- map ファイルで `gemm_bench_run` / `gemm_bench_run._omp_fn.0` / `GOMP_parallel` /
+  `omp_get_num_threads` / `omp_get_thread_num` / port の `self_is_worker` が `.cp_text_sram` に
+  入り、そこから `__aeabi_*` (flash) への参照が無いこと
+- 起動時ラン: `[omp] cp open ok` → mode= 付きの `GEMM-MPI` 3 行 → `GEMM-CMP … PASS`
+- worker が実際に CP で走った証拠: worker 側の fn 呼び出しで `self_is_worker` が 1
+  (`[omp] worker on cp=1` を MCU 側でカウントして出す)
+- タイムアウト経路: join が 1000 ms を超えると `[omp] FAIL worker timeout` を出して逐次で完走
+
+### 15.5 リスク
+
+- `-fopenmp` が none-eabi で libgomp の `omp.h` を探しに行く → 自前 `omp.h` を `-I` で先に置く
+  (既に `-Iapps/main`)
+- CP 側のクラッシュは MCU の TRACE に `cp_trace_crash_notify` 経由で出る。GEMM の内側ループが
+  flash 上の関数を呼ぶと即死する: -O2 で libgcc 呼び出しは出ない見込み (M4 の UDIV/SDIV と
+  FPU) だが、map で確認するまで確定しない
+- `-fstack-protector-strong`: `__stack_chk_guard` は RAM、`__stack_chk_fail` は flash
+  (失敗時のみ) → 正常系は影響なし
+- A2DP 再生中の 5 連タップ: CP を A2DP デコーダと共有する (`accel_loop` はタスク順に逐次処理)
+  ので GEMM の分だけデコードが遅れる。デモ中は再生を止める
+- CP を開いたままにする消費電力 (WFI 待機) — 実験用途では許容
