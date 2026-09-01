@@ -184,14 +184,16 @@ scripts/spp_latency/com_kill.sh
 ```
 [omp] cp open ok after 3 ms                                  ← 起動時に CP を開いた
 GEMM-MPI mode=mpi N=32 rank=0 size=2 threads=1 checksum=32768.000000 expect=32768.000000 PASS
-GEMM-MPI mode=mpi elapsed=1234 us frames tx=1 rx=1 err=0
+GEMM-MPI mode=mpi elapsed=3683 us frames tx=1 rx=0 err=0
 GEMM-MPI mode=mpi+omp N=32 rank=0 size=2 threads=2 checksum=... PASS
-GEMM-MPI mode=mpi+omp elapsed=... us frames ...
+GEMM-MPI mode=mpi+omp elapsed=313258 us frames tx=1 rx=2 err=0
+[omp] last region: primary share=1226 us, extra wait for cp=0 us   ← 並列領域そのものの時間
 GEMM-MPI mode=single N=32 rank=0 size=1 threads=1 checksum=... PASS
-GEMM-MPI mode=single elapsed=... us frames tx=0 rx=0 err=0
-GEMM-CMP N=32 rank=0 size=2 threads=2 single=... us mpi=... us mpiomp=... us PASS
-GEMM-CMP rank=0 speedup vs single: mpi=x0.85 mpiomp=x1.40 worker_on_cp=2
+GEMM-MPI mode=single elapsed=3783 us frames tx=0 rx=0 err=0
+GEMM-CMP N=32 rank=0 size=2 threads=2 single=3783 us mpi=3683 us mpiomp=313258 us PASS
+GEMM-CMP rank=0 speedup vs single: mpi=x1.02 mpiomp=x0.01 worker_on_cp=3
 ```
+(2026-09-01 Run 16 タップ #2 の実測値。design doc §15.6)
 
 - `speedup` = single の elapsed ÷ そのモードの elapsed。1.00 未満は「1 バッズ 1 コアより遅い」
   (MPI の Allreduce が TWS リンクを往復する分が上乗せされる)
@@ -201,6 +203,11 @@ GEMM-CMP rank=0 speedup vs single: mpi=x0.85 mpiomp=x1.40 worker_on_cp=2
 - `threads=1` のまま `mpi+omp` が出るときは CP open に失敗して逐次にフォールバックしている
 - elapsed は µs (fast timer)。従来の `elapsed=%u ms` 行は無くなった
 - `GEMM-MPI mode=single … rank=0 size=1` は左右どちらのバッズも出す (single は各自ローカルに走る)
+- `[omp] last region` の `primary share` が MCU 側の担当行の計算時間、`extra wait for cp` が
+  その後さらに CP を待った時間。後者が 0〜1 us なら CP は MCU より先に終わっている。**mpi / mpi+omp
+  の elapsed は TWS の Allreduce 待ち (sniff 復帰で ~300 ms) が支配的**なので、コアの効果は
+  この行と single の比で読む (実測: 1226 us vs 3783 us、§15.6)
+- 起動時ランはクロックを上げる前に走るので single が 15 ms 前後、タップ時は 3.8 ms 前後
 
 ## 5. UART の見方
 
@@ -246,6 +253,13 @@ GEMM elapsed=<n> ms
 2026-08-31 実測: 3 経路すべて厳密一致で PASS。
 
 ## 7. トラブルシュート
+
+- **`docker compose run --rm builder bestool …` が `cannot execute binary file`**: このコンテナの
+  エントリポイントは引数をシェルスクリプトとして実行するので、bestool やコマンド列は直接渡せない。
+  `download.sh` のように 1 行スクリプト (`#!/bin/sh` + `exec bestool write-image … --port /dev/ttyACM0`)
+  を SDK 直下に置いて `docker compose run --rm builder ./flash-right.sh` の形で呼ぶ。UART の
+  キャプチャも同様に `stty -F /dev/ttyACM0 2000000 raw -echo; exec cat /dev/ttyACM0 >> /usr/src/cap/right.raw`
+  をスクリプトにして渡す (2026-09-01 実測)
 
 - **`[ctor]` 行が出ない**: 起動コードが `__libc_init_array` を呼んでいない。
   ハンドオーバー Appendix A のチェックリストに従い、呼び出しを確認・追加する。

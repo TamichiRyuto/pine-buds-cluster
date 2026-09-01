@@ -2770,15 +2770,15 @@ pthread MPI ハーネスで 2 ランクが同時に parallel 領域へ入るテ�
 
 ### 15.4 実機確認項目 (ホストテスト対象外)
 
-- arm-none-eabi-g++ 9 が `-fopenmp` を受理し、`GOMP_parallel` を `omp_runtime` が供給して link
+- [x] arm-none-eabi-g++ 9 が `-fopenmp` を受理し、`GOMP_parallel` を `omp_runtime` が供給して link
   できること
-- map ファイルで `gemm_bench_run` / `gemm_bench_run._omp_fn.0` / `GOMP_parallel` /
+- [x] map ファイルで `gemm_bench_run` / `gemm_bench_run._omp_fn.0` / `GOMP_parallel` /
   `omp_get_num_threads` / `omp_get_thread_num` / port の `self_is_worker` が `.cp_text_sram` に
   入り、そこから `__aeabi_*` (flash) への参照が無いこと
-- 起動時ラン: `[omp] cp open ok` → mode= 付きの `GEMM-MPI` 3 行 → `GEMM-CMP … PASS`
-- worker が実際に CP で走った証拠: worker 側の fn 呼び出しで `self_is_worker` が 1
+- [x] 起動時ラン: `[omp] cp open ok` → mode= 付きの `GEMM-MPI` 3 行 → `GEMM-CMP … PASS`
+- [x] worker が実際に CP で走った証拠: worker 側の fn 呼び出しで `self_is_worker` が 1
   (`[omp] worker on cp=1` を MCU 側でカウントして出す)
-- タイムアウト経路: join が 1000 ms を超えると `[omp] FAIL worker timeout` を出して逐次で完走
+- [ ] タイムアウト経路: join が 1000 ms を超えると `[omp] FAIL worker timeout` を出して逐次で完走
 
 ### 15.5 リスク
 
@@ -2792,3 +2792,43 @@ pthread MPI ハーネスで 2 ランクが同時に parallel 領域へ入るテ�
 - A2DP 再生中の 5 連タップ: CP を A2DP デコーダと共有する (`accel_loop` はタスク順に逐次処理)
   ので GEMM の分だけデコードが遅れる。デモ中は再生を止める
 - CP を開いたままにする消費電力 (WFI 待機) — 実験用途では許容
+
+### 15.6 実測 (Run 16, 2026-09-01 17:35〜17:45)
+
+ビルド `open_source.bin` 17:38 (計測行入り)。書き込み直後の片側起動 (17:35) と、両バッズ同時
+再起動 (17:42、右 = IBRT master = rank 0) の起動時ラン、ケース内 5 連タップ 2 回 (右 → 左)。
+生ログは `~/.claude/handover/artifacts/2026-09-01-run16-omp-cp/`。
+
+| ラン | single | mpi | mpi+omp | 並列領域 (primary share / CP 待ち) | worker_on_cp |
+|---|---|---|---|---|---|
+| 起動時 (rank 0) | 15184 us | 60298 us (x0.25) | 130263 us (x0.11) | 4717 us / 1 us | 1 |
+| 起動時 (rank 1) | 15138 us | 188982 us | 131398 us | 4719 us / 1 us | 1 |
+| タップ #1 右 (rank 0) | 3783 us | 235777 us (x0.01) | 318152 us (x0.01) | 1226 us / 0 us | 2 |
+| タップ #1 (rank 1) | 3765 us | 313085 us | 316916 us | 1210 us / 0 us | 2 |
+| タップ #2 左 (rank 0) | 3783 us | **3683 us (x1.02)** | 313258 us (x0.01) | 1226 us / 0 us | 3 |
+| タップ #2 (rank 1) | 3765 us | 212045 us | 318164 us | 1209 us / 0 us | 3 |
+
+- **第 2 コアは動いている**: 全ランで `worker_on_cp` が 1 ずつ増え (CP 上で `self_is_worker()==1`
+  として fn が走った回数)、`extra wait for cp` は 0〜1 us — CP は MCU が自分の担当行を終える前に
+  終わっている。並列領域 1226 us は 1 コアでの半分 (3783/2 ≈ 1890 us) に対し 1.54 倍、
+  問題全体 (single 3783 us) に対しては 3.1 倍で、**計算部分は 2 バッズ × 2 コア = 4 コア分の
+  効果が出ている**
+- **elapsed は TWS リンクに支配される**: `mpi+omp` が両側とも常に 313〜318 ms なのは、その
+  Allreduce が 2 回目の交換で、slave → master 方向のフレーム (データと直前の ACK) が sniff 復帰まで
+  ~300 ms 待つため (右 UART の `RCV:0105/0106` が `mode=mpi elapsed` 行の ~300 ms 後に到着)。
+  `mpi` はタップした側や直前のリンク状態で 3.7〜236 ms とばらつく (§14.4 と同じ現象)。
+  x1.02 (タップ #2 右) がリンクが起きている時の MPI の実力で、半分の行 + Allreduce 1 往復 ≈ single
+- 起動時ランは `app_sysfreq` を上げる前に走るので single が 15 ms (タップ時 3.8 ms の 4 倍)。
+  比較は同じラン内で閉じているので速度向上率には影響しない
+- **COM6 (SPP)**: 開いた瞬間に #4 `[omp] cp open ok` から #54 `GEMM-CMP … worker_on_cp=3` まで
+  56 行が欠落なく届いた (`run16-com6.log`)。今回は右が master だったので rank 0 の行が見えた
+- 書き込み直後の片側起動 (17:35) も 3 モード PASS (single 15125 / mpi 10253 (x1.47) /
+  mpi+omp 303734 us、`run16a-first-boot-after-flash/`)。§14.4 の「単独起動は縮退」と違い、左の
+  書き込み完了後に握手が成功して size=2 で完走した
+- 未達: タイムアウト経路 (`[omp] FAIL worker timeout`) は発生しなかったので未確認
+
+次の一手 (未着手): 比較ランの間 TWS リンクを sniff から外す (ラン前に exit sniff を要求する、
+または 3 モードを 1 回の START で連続させず各モードの前に相手と同期する) と、mpi / mpi+omp の
+elapsed がリンク遅延ではなく計算を映すようになる。1 バッズ 2 コアだけの `omp` モードを 4 つ目
+として足すのも安価 (`mpi_ibrt_install_seams(0,1)` + `omp_set_num_threads(2)`)。
+
