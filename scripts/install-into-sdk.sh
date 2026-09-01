@@ -48,6 +48,10 @@
 #      defines SPP_LOG_ACCESS_MODE=BTIF_BAM_GENERAL_ACCESSIBLE so the SPP
 #      log re-arm (§13.4.3) also turns inquiry scan on, letting Windows
 #      discover the buds for a fresh pairing (§13.7 step 0). Off by default
+#  12. Copies run_trigger.{h,cpp} (design §14) and patches
+#      apps/main/key_handler.cpp so a 5-tap (APP_KEY_EVENT_RAMPAGECLICK,
+#      unbound in the fork's key table) calls mpi_ibrt_trigger_run(),
+#      re-running GEMM-MPI on both buds. Single tap stays play/pause
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -58,9 +62,11 @@ TARGET_MK="${SDK_DIR}/config/open_source/target.mk"
 SEARCH_PAIR_UI="${SDK_DIR}/services/app_ibrt/src/app_ibrt_search_pair_ui.cpp"
 BESMAIN_CPP="${SDK_DIR}/services/bt_app/besmain.cpp"
 BATTERY_CPP="${SDK_DIR}/apps/battery/app_battery.cpp"
+KEY_HANDLER_CPP="${DST}/key_handler.cpp"
 MARKER="pine-buds-cluster compute hook"
 FULL_CHARGE_MARKER="pine-buds-cluster full-charge keep-alive"
 PAIRING_MARKER="pine-buds-cluster SPP pairing build"
+TAP_MARKER="pine-buds-cluster 5-tap run"
 MPI_MARKER="pine-buds-cluster MPI/IBRT hook"
 TWS_HOLD_MARKER="pine-buds-cluster in-case TWS hold"
 CHARGE_MARKER="pine-buds-cluster charging poweron"
@@ -87,6 +93,8 @@ cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/log_ring.cpp \
    "${REPO_ROOT}"/firmware/pinebuds_compute/spp_log_service.h \
    "${REPO_ROOT}"/firmware/pinebuds_compute/spp_log_service.cpp \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/run_trigger.h \
+   "${REPO_ROOT}"/firmware/pinebuds_compute/run_trigger.cpp \
    "${DST}/"
 echo "[ok] MPI/OpenMP adapters + bench + IBRT glue + SPP log service copied into apps/main/"
 
@@ -280,6 +288,48 @@ text = text.replace(old, new)
 open(path, "w").write(text)
 EOF
     echo "[ok] full-charge app_shutdown() disabled in apps/battery/app_battery.cpp"
+fi
+
+if grep -q "${TAP_MARKER}" "${KEY_HANDLER_CPP}"; then
+    echo "[ok] 5-tap run hook already present"
+else
+    python3 - "${KEY_HANDLER_CPP}" <<'EOF'
+import sys
+
+path = sys.argv[1]
+# docs/design-ibrt-transport.md §14: bind the unused 5-tap gesture to the
+# MPI re-run. app_key_handle_registration() overwrites an existing
+# (code, event) slot instead of appending, so a new (PWR, RAMPAGECLICK)
+# entry is the only way to add a gesture without stealing play/pause.
+# The handler runs on app_thread; mpi_ibrt_trigger_run() never blocks.
+decl_anchor = "void app_key_init(void) {"
+decl = """extern "C" void mpi_ibrt_trigger_run(void); /* pine-buds-cluster 5-tap run */
+
+void app_key_compute_run(APP_KEY_STATUS *status, void *param) {
+  TRACE(2, "%s event %d", __func__, status->event);
+  mpi_ibrt_trigger_run();
+}
+
+"""
+entry_anchor = """      {{APP_KEY_CODE_PWR, APP_KEY_EVENT_LONGPRESS},
+       "",
+       app_key_long_press_down,
+       NULL},
+"""
+entry = entry_anchor + """      {{APP_KEY_CODE_PWR, APP_KEY_EVENT_RAMPAGECLICK}, /* pine-buds-cluster 5-tap run */
+       "",
+       app_key_compute_run,
+       NULL},
+"""
+
+text = open(path).read()
+assert text.count(decl_anchor) == 1, "app_key_init definition not unique; re-check"
+assert text.count(entry_anchor) == 1, "LONGPRESS key_cfg entry not unique; re-check"
+text = text.replace(decl_anchor, decl + decl_anchor)
+text = text.replace(entry_anchor, entry)
+open(path, "w").write(text)
+EOF
+    echo "[ok] 5-tap (RAMPAGECLICK) -> mpi_ibrt_trigger_run() added to apps/main/key_handler.cpp"
 fi
 
 echo

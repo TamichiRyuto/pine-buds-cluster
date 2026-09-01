@@ -14,6 +14,11 @@ extern "C" {
 // the compute thread. Returns immediately -- does not block app_init.
 void mpi_ibrt_glue_start(void);
 
+// Design §14: 5-tap entry point (apps/main/key_handler.cpp, app_thread).
+// Starts a GEMM-MPI re-run on both buds; ignored while one is in progress
+// or before the boot run has finished. Never blocks.
+void mpi_ibrt_trigger_run(void);
+
 #ifdef __cplusplus
 }
 #endif

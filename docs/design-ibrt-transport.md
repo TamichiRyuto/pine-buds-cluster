@@ -2451,3 +2451,62 @@ Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
     BD アドレスを広告)。同ランの `[mpi-t1]` は `probe len=512 ok` / `max_payload=512` /
     `rtt n=100 min=44 avg=169 max=407 ms` で、Run 11 (右, `max_payload=4`) より大幅に良い。
     初回チャンクの重複 (6) は再現せず。
+
+---
+
+## 14. 5 連タップで GEMM-MPI を再実行する (2026-09-01)
+
+§13 までのランは起動時の一発実行だった (`compute_main()` → `mpi_compute_thread` → TWS 立ち上げ
+→ 握手 → プローブ → M-T3 → `MPI_Finalize` → 永眠)。「イヤホンとして使いながら裏で計算する」
+デモに向けて、**タッチ操作で何度でも再実行**できるようにする。
+
+### 14.1 SDK 側の事実 (Explore 調査、2026-09-01)
+
+- `open_source` ビルドにタッチ IC ドライバは無い。タッチパッドは BES2300YP **PMU の電源キー
+  入力**として入り、ジェスチャ判定は `platform/hal/hal_key.c` がソフトで行う
+  (クリック間隔 `CFG_SW_KEY_DBLCLICK_THRESH_MS` 400 ms、長押し 1500 ms、ポーリング 40 ms)。
+  N 連クリックは `HAL_KEY_EVENT_CLICK + cnt_click` で合成される (`hal_key.c:928/:941`)
+- 経路: PMU 割り込み → `hal_key_debounce_handler` (TIMER01 ISR) → `key_event_process`
+  (`apps/key/app_key.cpp:37`) → `app_mailbox_put` → **`app_thread`** (osPriorityHigh、
+  スタック 3 KB) → `app_key_handle_process` → 登録済みハンドラ
+- このフォークのキーテーブルは `apps/main/key_handler.cpp:216-247` `app_key_init()` に
+  あり、CLICK=再生/停止、DOUBLE/TRIPLE/ULTRA(4)/LONGPRESS が割り当て済み。
+  **`APP_KEY_EVENT_RAMPAGECLICK` (5 連) は未割当**。`app_key_handle_registration()` は同じ
+  (code, event) を上書きするので、単タップを奪わずに増やすには未割当イベントを使うしかない
+- ハンドラは**タップされた側のバッズだけ**で 1 回走る。TWS 相手にはデコード済みの
+  アクション (`IBRT_ACTION_PLAY` 等) しか送られず、生のキーイベントは転送されない
+  (`app_ibrt_if_start_user_action`, `app_ibrt_keyboard.cpp:263`)
+- 充電起動でも `app_key_open()` (`apps.cpp:2053`) と `app_key_init()` (`:2388`) は
+  `compute_main()` (`:2454`) より前に走る (§12.4 手順 3/6)
+
+### 14.2 設計
+
+1. **純ロジック `run_trigger`** (`firmware/pinebuds_compute/run_trigger.{h,cpp}`、
+   ホストテスト `tests/test_run_trigger.cpp` T1〜T8): 実行中は全入力を無視。idle で
+   ローカルタップ → `START_NOTIFY` (seq+1、相手に通知)、idle で相手からの START →
+   `START` (seq は max を採用)。TWS コマンドは送信元にエコーされないので seq による
+   重複排除は不要。seq はログのラベル
+2. **START フレーム**: 既存の cmdcode 0x8201 に kind 5 (`kKindStart`) を追加
+   (`[kind, seq LE32]`、5 バイト)。受信は `mpi_ibrt_cmdhandler` (BesbtThread) で
+   `run_trigger_on_peer_start` → `START` ならセマフォ `g_run_sem` を解放
+3. **入口 `mpi_ibrt_trigger_run()`** (app_thread): `run_trigger_on_local_tap` →
+   `START_NOTIFY` なら cmd channel が生きていれば START を送って自分のセマフォも解放。
+   ブロックしない (mutex は数命令、`tws_ctrl_send_cmd` はキュー投入)
+4. **compute スレッド**: 起動時ランはそのまま。`finalize done` の後、永眠の代わりに
+   `g_run_sem` で待ち、起きたら `app_sysfreq_req(APP_SYSFREQ_USER_APP_4, 104M)` →
+   `mpi_ibrt_install_seams` (MPI を再ブートストラップ、冪等) → M-T3 → `MPI_Finalize` →
+   sysfreq を 32K に戻す → `[mpi] run #<seq> done rank=%d` → `run_trigger_on_run_done`。
+   `APP_SYSFREQ_USER_APP_4` は SDK が `UNUSED` と明記しているスロット (`app_utils.h:29`)。
+   起動時ランが終わるまで (`g_runs_enabled`) タップは無視する
+5. **キー登録**: `install-into-sdk.sh` 手順 12 が `key_handler.cpp` に
+   `{APP_KEY_CODE_PWR, APP_KEY_EVENT_RAMPAGECLICK} → app_key_compute_run()` を足す
+6. **SPP ログ**: 各ランの行はリングに積まれ、COM6 が開いていればそのまま流れる。seq は
+   起動からの通し番号なので `spp_tail.py` の GAP 検出はそのまま有効
+
+### 14.3 既知の割り切り
+
+- 相手の START が落ちる、または相手がまだ実行中で無視した場合、タップした側だけが走り
+  MPI は §11 のストール検出 (5 s) 経由で FAIL 行を出して完走する。ラン中の連打は捨てる
+- `mpi_frag_counters` は累積なので `frames tx/rx` はラン間で増え続ける
+  (`install_seams` の `mpi_frag_init` でリセットされる場合はその限りでない — 実測で確認)
+- ケース内でタッチパッドに触れるかは未確認 (単タップで再生/停止が効くかで判定できる)

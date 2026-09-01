@@ -22,6 +22,7 @@
 #include "mpi.h"
 #include "mpi_adapter.h"
 #include "mpi_frag.h"
+#include "run_trigger.h"
 #include "spp_log_service.h"
 
 #include <string.h>
@@ -34,6 +35,7 @@
 #include "app_tws_if.h"                // app_tws_is_right_side / app_tws_is_unknown_side
 #include "app_ibrt_ui.h"               // app_ibrt_ui_t, app_ibrt_ui_get_ctx, IBRT_OUT_BOX, IBRT_OPEN_BOX_EVENT, IBRT_FETCH_OUT_EVENT
 #include "app_ibrt_if.h"               // app_ibrt_if_event_entry
+#include "app_utils.h"                 // app_sysfreq_req, APP_SYSFREQ_USER_APP_4 (unused by the SDK, app_utils.h:29)
 #include "besaud_api.h"                // btif_besaud_is_connected
 #include "cmsis_os.h"
 #include "hal_timer.h"
@@ -61,11 +63,14 @@ const uint32_t kMpiIbrtCmdFrame = 0x8201u;
 // intercepted in the RX handler below and never reach mpi_frag_on_frame.
 const unsigned char kKindProbe = 3;
 const unsigned char kKindProbeEcho = 4;
+const unsigned char kKindStart = 5;  // [kind, seq LE32]: peer asks us to run (design §14)
 
 typedef char kMpiIbrtKindCheck[(kKindProbe != MPI_FRAG_KIND_DATA &&
                                 kKindProbe != MPI_FRAG_KIND_ACK &&
                                 kKindProbeEcho != MPI_FRAG_KIND_DATA &&
-                                kKindProbeEcho != MPI_FRAG_KIND_ACK)
+                                kKindProbeEcho != MPI_FRAG_KIND_ACK &&
+                                kKindStart != MPI_FRAG_KIND_DATA &&
+                                kKindStart != MPI_FRAG_KIND_ACK)
                                    ? 1
                                    : -1];
 
@@ -100,11 +105,17 @@ osMutexId g_port_mutex = 0;
 osSemaphoreId g_wake_sem = 0;
 osSemaphoreId g_credit_sem = 0;
 osSemaphoreId g_probe_sem = 0;
+osSemaphoreId g_run_sem = 0;        // one token per run to start (design §14)
+osMutexId g_trigger_mutex = 0;      // serialises g_trigger across app/Besbt/compute threads
+run_trigger g_trigger;
+volatile int g_runs_enabled = 0;    // 0 until the boot run has finished
 
 osMutexDef(mpi_ibrt_port_mutex);
 osSemaphoreDef(mpi_ibrt_wake_sem);
 osSemaphoreDef(mpi_ibrt_credit_sem);
 osSemaphoreDef(mpi_ibrt_probe_sem);
+osSemaphoreDef(mpi_ibrt_run_sem);
+osMutexDef(mpi_ibrt_trigger_mutex);
 
 int g_self_rank = 0;
 uint32_t g_wtime_base_ms = 0;
@@ -184,6 +195,24 @@ void mpi_ibrt_cmdhandler(uint16_t rsp_seq, uint8_t *p_buff, uint16_t length) {
         g_probe_echo_len = (int)length;
         g_probe_echo_rank = (length >= 2) ? (int)p_buff[1] : -1;
         osSemaphoreRelease(g_probe_sem);
+        return;
+    }
+    if (kind == kKindStart) {
+        unsigned seq = 0;
+        if (length >= 5) {
+            seq = (unsigned)p_buff[1] | ((unsigned)p_buff[2] << 8) |
+                  ((unsigned)p_buff[3] << 16) | ((unsigned)p_buff[4] << 24);
+        }
+        if (!g_runs_enabled) {
+            return;
+        }
+        osMutexWait(g_trigger_mutex, osWaitForever);
+        int act = run_trigger_on_peer_start(&g_trigger, seq);
+        osMutexRelease(g_trigger_mutex);
+        if (act == RUN_TRIGGER_START) {
+            COMPUTE_TRACE(1, "[mpi] run #%u trigger=peer", g_trigger.seq);
+            osSemaphoreRelease(g_run_sem);
+        }
         return;
     }
 
@@ -676,9 +705,24 @@ void mpi_compute_thread(void const *argument) {
     // Never return: with __RTX_CPU_STATISTICS__=1 this SDK's RTX faults on
     // thread self-termination (rt_tsk_delete NULLs os_tsk.run, then
     // rt_switch_req dereferences it; design doc §11.5). Park like every
-    // other SDK thread does.
+    // other SDK thread does -- here parked on the run semaphore: design
+    // §14, every 5-tap (local, or relayed by the peer as a START frame)
+    // re-runs M-T3 over the TWS link that is still up. The boot run ran
+    // before app_init dropped the sysfreq, so ask for the clock back for
+    // the duration of each re-run.
+    g_runs_enabled = 1;
     for (;;) {
-        osDelay(10000);
+        osSemaphoreWait(g_run_sem, osWaitForever);
+        unsigned seq = g_trigger.seq;
+        app_sysfreq_req(APP_SYSFREQ_USER_APP_4, APP_SYSFREQ_104M);
+        mpi_ibrt_install_seams(self_rank, size);
+        mpi_ibrt_run_mt3(self_rank, size);
+        MPI_Finalize();
+        app_sysfreq_req(APP_SYSFREQ_USER_APP_4, APP_SYSFREQ_32K);
+        COMPUTE_TRACE(2, "[mpi] run #%u done rank=%d", seq, self_rank);
+        osMutexWait(g_trigger_mutex, osWaitForever);
+        run_trigger_on_run_done(&g_trigger);
+        osMutexRelease(g_trigger_mutex);
     }
 }
 
@@ -686,7 +730,41 @@ osThreadDef(mpi_compute_thread, osPriorityBelowNormal, 1, 4096, "mpi_compute");
 
 }  // namespace
 
+// Design §14: called from the key table (apps/main/key_handler.cpp, 5-tap)
+// on app_thread. Must not block: the mutex is only ever held for a few
+// instructions and tws_ctrl_send_cmd just queues.
+extern "C" void mpi_ibrt_trigger_run(void) {
+    if (!g_runs_enabled || g_trigger_mutex == 0) {
+        COMPUTE_TRACE(0, "[mpi] tap ignored: boot run not finished");
+        return;
+    }
+    unsigned seq = 0;
+    osMutexWait(g_trigger_mutex, osWaitForever);
+    int act = run_trigger_on_local_tap(&g_trigger, &seq);
+    osMutexRelease(g_trigger_mutex);
+    if (act != RUN_TRIGGER_START_NOTIFY) {
+        COMPUTE_TRACE(0, "[mpi] tap ignored: run in progress");
+        return;
+    }
+    unsigned char frame[5];
+    frame[0] = kKindStart;
+    frame[1] = (unsigned char)(seq & 0xFF);
+    frame[2] = (unsigned char)((seq >> 8) & 0xFF);
+    frame[3] = (unsigned char)((seq >> 16) & 0xFF);
+    frame[4] = (unsigned char)((seq >> 24) & 0xFF);
+    int sent = 0;
+    if (mpi_ibrt_cmd_channel_ready()) {
+        tws_ctrl_send_cmd(kMpiIbrtCmdFrame, frame, sizeof(frame));
+        sent = 1;
+    }
+    COMPUTE_TRACE(2, "[mpi] run #%u trigger=local peer_notified=%d", seq, sent);
+    osSemaphoreRelease(g_run_sem);
+}
+
 extern "C" void mpi_ibrt_glue_start(void) {
+    run_trigger_init(&g_trigger);
+    g_trigger_mutex = osMutexCreate(osMutex(mpi_ibrt_trigger_mutex));
+    g_run_sem = osSemaphoreCreate(osSemaphore(mpi_ibrt_run_sem), 0);
     g_port_mutex = osMutexCreate(osMutex(mpi_ibrt_port_mutex));
     g_wake_sem = osSemaphoreCreate(osSemaphore(mpi_ibrt_wake_sem), 0);
     g_credit_sem =
