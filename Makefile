@@ -36,6 +36,7 @@ check98:
 	@mkdir -p $(BUILDDIR)/check98
 	$(CXX) $(TARGET_DIALECT) $(BENCH_WNO) -Iadapters/mpi -Iadapters/omp -c $(SRC) $(MPISRC) $(OMPSRC) bench/gemm_mpi_omp.cpp firmware/pinebuds_compute/compute_main.cpp $(RINGSRC) $(TRIGSRC) $(FSMSRC)
 	@mv *.o $(BUILDDIR)/check98/
+	$(CXX) $(TARGET_DIALECT) -fopenmp -Iadapters/mpi -Iadapters/omp -c bench/gemm_mpi_omp.cpp -o $(BUILDDIR)/check98/gemm_mpi_omp_openmp.o
 	@echo "gnu++98 target-dialect check OK"
 
 test: $(TESTBIN) $(MPIBIN) $(OMPBIN) $(BENCHBIN) $(FRAGBIN) $(RINGBIN) $(TRIGBIN) $(FSMBIN) check98
@@ -64,10 +65,20 @@ $(FRAGBIN): tests/test_mpi_frag.cpp $(MPISRC) $(wildcard adapters/mpi/*.h) tests
 	@mkdir -p $(BUILDDIR)
 	$(CXX) $(CXXFLAGS) -Iadapters/mpi -Itests tests/test_mpi_frag.cpp $(MPISRC) -o $@
 
-$(BENCHBIN): tests/test_gemm_bench.cpp bench/gemm_mpi_omp.cpp $(MPISRC) $(OMPSRC) $(wildcard adapters/*/*.h) tests/test_framework.h tests/mpi_thread_port.h
+# The bench is compiled with -fopenmp (compile step only, so no -lgomp is
+# pulled in at link time) exactly as the target build does: GCC outlines
+# its `#pragma omp parallel for` into a GOMP_parallel call that our runtime
+# (adapters/omp) serves -- design §15.2 items 1-2, test R9.
+BENCH_OMP_OBJ := $(BUILDDIR)/gemm_mpi_omp_openmp.o
+
+$(BENCH_OMP_OBJ): bench/gemm_mpi_omp.cpp $(wildcard adapters/*/*.h)
 	@mkdir -p $(BUILDDIR)
-	$(CXX) $(CXXFLAGS) $(BENCH_WNO) -pthread -DGEMM_BENCH_NO_MAIN -Iadapters/mpi -Iadapters/omp -Itests \
-		tests/test_gemm_bench.cpp bench/gemm_mpi_omp.cpp $(MPISRC) $(OMPSRC) -o $@
+	$(CXX) $(CXXFLAGS) -fopenmp -DGEMM_BENCH_NO_MAIN -Iadapters/mpi -Iadapters/omp -c bench/gemm_mpi_omp.cpp -o $@
+
+$(BENCHBIN): tests/test_gemm_bench.cpp $(BENCH_OMP_OBJ) $(MPISRC) $(OMPSRC) $(wildcard adapters/*/*.h) tests/test_framework.h tests/mpi_thread_port.h tests/omp_thread_port.h
+	@mkdir -p $(BUILDDIR)
+	$(CXX) $(CXXFLAGS) -pthread -DGEMM_BENCH_NO_MAIN -Iadapters/mpi -Iadapters/omp -Itests \
+		tests/test_gemm_bench.cpp $(BENCH_OMP_OBJ) $(MPISRC) $(OMPSRC) -o $@
 
 $(RINGBIN): tests/test_log_ring.cpp $(RINGSRC) firmware/pinebuds_compute/log_ring.h tests/test_framework.h
 	@mkdir -p $(BUILDDIR)

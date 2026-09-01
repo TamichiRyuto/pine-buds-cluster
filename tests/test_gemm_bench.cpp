@@ -14,12 +14,17 @@
 // [x] two ranks under the pthread port: both ranks get checksum N^3, each
 //     having computed only its own row half
 // [x] N above the static capacity is rejected with a nonzero error
+// [x] R9 (design §15.3): built with -fopenmp against our runtime and the
+//     pthread omp port, a single rank with 2 threads still yields N^3 and
+//     the worker thread ran the outlined loop body exactly once
 
 #include "test_framework.h"
 
 #include "mpi.h"
 #include "mpi_adapter.h"
 #include "mpi_thread_port.h"
+#include "omp.h"
+#include "omp_thread_port.h"
 
 extern "C" int gemm_bench_run(int n, float *checksum_out);
 
@@ -64,9 +69,30 @@ static void test_oversize_n_rejected() {
     CHECK(MPI_Finalize() == MPI_SUCCESS);
 }
 
+static void test_r9_openmp_two_threads_single_rank() {
+    mpi_adapter_bootstrap(0, 1);
+    CHECK(MPI_Init(0, 0) == MPI_SUCCESS);
+    omp_thread_port::install();
+    omp_set_num_threads(2);
+    CHECK(omp_get_max_threads() == 2);
+
+    float checksum = 0.0f;
+    CHECK(gemm_bench_run(8, &checksum) == 0);
+    CHECK_EQ_F(checksum, 512.0f);  // 8^3
+    // The `#pragma omp parallel for` in the unmodified bench reached our
+    // GOMP_parallel and forked the worker thread once.
+    CHECK(omp_thread_port::g_starts == 1);
+    CHECK(omp_thread_port::g_joins == 1);
+
+    omp_set_port(nullptr);
+    omp_set_num_threads(1);
+    CHECK(MPI_Finalize() == MPI_SUCCESS);
+}
+
 int main() {
     RUN_TEST(test_single_rank_checksum);
     RUN_TEST(test_two_ranks_checksum);
     RUN_TEST(test_oversize_n_rejected);
+    RUN_TEST(test_r9_openmp_two_threads_single_rank);
     return testfw::summary();
 }
