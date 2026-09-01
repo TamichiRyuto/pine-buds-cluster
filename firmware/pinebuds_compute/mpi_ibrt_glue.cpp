@@ -567,7 +567,7 @@ void mpi_ibrt_run_compare(int rank, int size) {
 
     mpi_ibrt_install_seams(rank, size);
     omp_set_num_threads(omp_get_num_procs());
-    mt3_result r_omp = mpi_ibrt_run_mt3(rank, size, "mpi+omp");
+    mt3_result r_mpiomp = mpi_ibrt_run_mt3(rank, size, "mpi+omp");
     int omp_threads = omp_get_max_threads();
     MPI_Finalize();
     {
@@ -589,22 +589,22 @@ void mpi_ibrt_run_compare(int rank, int size) {
     mt3_result r_single = mpi_ibrt_run_mt3(0, 1, "single");
     MPI_Finalize();
 
-    int all_pass = r_mpi.pass && r_omp.pass && r_single.pass;
-    int w_mpi = 0, f_mpi = 0, w_omp = 0, f_omp = 0;
+    int all_pass = r_mpi.pass && r_mpiomp.pass && r_single.pass;
+    int w_mpi = 0, f_mpi = 0, w_mpiomp = 0, f_mpiomp = 0;
     mpi_ibrt_speedup_parts(r_single.elapsed_us, r_mpi.elapsed_us, &w_mpi,
                            &f_mpi);
-    mpi_ibrt_speedup_parts(r_single.elapsed_us, r_omp.elapsed_us, &w_omp,
-                           &f_omp);
+    mpi_ibrt_speedup_parts(r_single.elapsed_us, r_mpiomp.elapsed_us,
+                           &w_mpiomp, &f_mpiomp);
     COMPUTE_TRACE(8,
                   "GEMM-CMP N=%d rank=%d size=%d threads=%d single=%u us "
                   "mpi=%u us mpiomp=%u us %s",
                   kBenchN, rank, size, omp_threads, r_single.elapsed_us,
-                  r_mpi.elapsed_us, r_omp.elapsed_us,
+                  r_mpi.elapsed_us, r_mpiomp.elapsed_us,
                   all_pass ? "PASS" : "FAIL");
     COMPUTE_TRACE(6,
                   "GEMM-CMP rank=%d speedup vs single: mpi=x%d.%02d "
                   "mpiomp=x%d.%02d worker_on_cp=%u",
-                  rank, w_mpi, f_mpi, w_omp, f_omp,
+                  rank, w_mpi, f_mpi, w_mpiomp, f_mpiomp,
                   omp_cp_port_worker_runs());
 }
 
