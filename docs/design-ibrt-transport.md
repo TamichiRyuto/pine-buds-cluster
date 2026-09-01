@@ -2689,7 +2689,9 @@ WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォ
 ### 15.2 設計
 
 1. **並列化は GCC に任せる**: `bench/gemm_mpi_omp.cpp` は無改変のまま、apps/main/Makefile に
-   `CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=apps/main/openmp-none-eabi.specs`
+   `CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=$(srctree)/apps/main/openmp-none-eabi.specs`
+   (コンパイラは `out/<target>/` から走るので `-specs` には `$(srctree)` が要る。`-I` は
+   `scripts/lib.mk:146` が自動で付ける)
    (このオブジェクトだけ。link には付けないので `-lgomp` は要求されない)。
    **素の `-fopenmp` は使えない**: GCC ドライバの組み込み self-spec (`GOMP_SELF_SPECS`) が
    `-fopenmp` に `-pthread` を足し、none-eabi では `unrecognized command line option

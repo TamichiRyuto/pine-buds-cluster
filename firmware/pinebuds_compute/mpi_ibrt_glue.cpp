@@ -557,6 +557,8 @@ void mpi_ibrt_speedup_parts(unsigned base_us, unsigned mode_us, int *whole,
     *frac2 = frac6 / 10000;
 }
 
+void mpi_ibrt_install_seams(int rank, int size);  // defined below
+
 void mpi_ibrt_run_compare(int rank, int size) {
     mpi_ibrt_install_seams(rank, size);
     omp_set_num_threads(1);

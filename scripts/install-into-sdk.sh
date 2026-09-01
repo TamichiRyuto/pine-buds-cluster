@@ -118,6 +118,15 @@ cp "${REPO_ROOT}"/adapters/mpi/mpi.h "${REPO_ROOT}"/adapters/mpi/mpi_adapter.h \
    "${DST}/"
 echo "[ok] MPI/OpenMP adapters + bench + IBRT glue + SPP log service copied into apps/main/"
 
+# Leftovers from renamed sources would be auto-globbed by apps/main/Makefile
+# and collide at link time (omp_stub.cpp became omp_runtime.cpp, design §15).
+for stale in omp_stub.cpp; do
+    if [ -f "${DST}/${stale}" ]; then
+        rm -f "${DST}/${stale}"
+        echo "[ok] removed stale ${stale} from apps/main/"
+    fi
+done
+
 if ! grep -q "PINEBUDS_TARGET" "${DST}/Makefile"; then
     printf '\n# %s\nccflags-y += -DPINEBUDS_TARGET\n' "${MARKER}" >> "${DST}/Makefile"
     echo "[ok] -DPINEBUDS_TARGET added to apps/main/Makefile"
@@ -143,19 +152,32 @@ else
     echo "[ok] apps/main/Makefile already has the SPP pairing opt-in"
 fi
 
-OMP_CFLAGS="CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=apps/main/openmp-none-eabi.specs"
+# The compiler runs from out/<target>/ with $(srctree) exported by the top
+# Makefile; scripts/lib.mk:146 prefixes -I paths with it automatically but
+# -specs= needs it spelled out.
+OMP_CFLAGS='CFLAGS_gemm_mpi_omp.o += -fopenmp-simd -specs=$(srctree)/apps/main/openmp-none-eabi.specs'
 if ! grep -q "${OMP_MARKER}" "${DST}/Makefile"; then
     # Per-object flag (scripts/lib.mk:138). Compile-only: OpenMP never
     # reaches the link line, so no -lgomp is requested; GOMP_parallel comes
     # from omp_runtime.cpp (design §15.2 items 1-2). The specs file is why
     # this is not a plain -fopenmp (see its header comment).
-    printf '\n# %s (docs/design-ibrt-transport.md §15)\n%s\n' \
+    printf '\n# %s (docs/design-ibrt-transport.md §15)\nccflags-y += -Iservices/cp_accel -Iservices/norflash_api\n%s\n' \
         "${OMP_MARKER}" "${OMP_CFLAGS}" >> "${DST}/Makefile"
     echo "[ok] OpenMP flags for gemm_mpi_omp.o added to apps/main/Makefile"
-elif grep -q '^CFLAGS_gemm_mpi_omp.o += -fopenmp$' "${DST}/Makefile"; then
-    # First revision used a bare -fopenmp, which the none-eabi driver rejects.
-    sed -i "s|^CFLAGS_gemm_mpi_omp.o += -fopenmp\$|${OMP_CFLAGS}|" "${DST}/Makefile"
-    echo "[ok] apps/main/Makefile OpenMP flags migrated to the specs form"
+elif ! grep -qF -- "${OMP_CFLAGS}" "${DST}/Makefile" || ! grep -q -- '-Iservices/cp_accel' "${DST}/Makefile"; then
+    # Earlier revisions wrote a different flag line; rewrite it in place.
+    python3 - "${DST}/Makefile" "${OMP_CFLAGS}" <<'EOF'
+import re, sys
+path, line = sys.argv[1], sys.argv[2]
+text = open(path).read()
+inc = "ccflags-y += -Iservices/cp_accel -Iservices/norflash_api"
+new, n = re.subn(r"^CFLAGS_gemm_mpi_omp\.o \+= .*$", line, text, flags=re.M)
+assert n == 1, "expected exactly one CFLAGS_gemm_mpi_omp.o line"
+if inc not in new:
+    new = new.replace(line, inc + "\n" + line)
+open(path, "w").write(new)
+EOF
+    echo "[ok] apps/main/Makefile OpenMP flags updated"
 else
     echo "[ok] apps/main/Makefile already compiles gemm_mpi_omp.o with OpenMP"
 fi
