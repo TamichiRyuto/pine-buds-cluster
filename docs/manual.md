@@ -137,6 +137,36 @@ UART で `CHARGING PWRON!` を確認してから次に進む。
 
 `peer_notified=0` なら TWS が切れている (相手は走らず、5 秒のストール検出を経て縮退で完走する)。
 
+注意 (2026-09-01 実測):
+- **COM6 (SPP) に出るのはその時点の IBRT master のリングだけ。** rank 0 (右) の
+  `GEMM-MPI … PASS` 行は右が master の起動でしか PC に届かない (左が master なら
+  `[mpi] run #n done rank=1` だけ)。両側の結果を見たいときは UART を併用する
+  (design doc §13.14-4)
+- タップは**バッズをケースに収めたまま**行う。充電起動のバッズはケースから出すと電源が落ちて
+  再起動する。蓋を開け、平らな外側のタッチ面に指の腹を面で当てて 400 ms 以内の間隔で 5 回
+- 反応が無いときは UART に `app_key_single_tap` が出るかで「触れているか」を切り分ける。
+  Run 15 では座った状態で単タップも拾えなかった個体差/当て方の問題があった (§13.14-5)
+
+### 4c. SPP ログの到達遅延を測る (design doc §13.9 条件 7)
+
+WSL 側の 1 つの時計で UART 到着と COM6 到着に印を付けて突き合わせる。ファーム側の変更は不要。
+
+```bash
+# 1) UART キャプチャ (docker の cat >> right.raw) に対して
+scripts/spp_latency/uart_ts.sh /path/right.raw R >> uart_ts.log &
+scripts/spp_latency/uart_ts.sh /path/left.raw  L >> uart_ts.log &
+# 2) COM6 を開く (Windows python を -u で起動し stdout を WSL で受ける)
+scripts/spp_latency/com_ts.sh COM6 >> com_ts.log &
+# 3) 起動時ランの途中で開くか、タップで行を発生させる
+# 4) 突き合わせ
+scripts/spp_latency/latency.py uart_ts.log com_ts.log
+# 5) 終了 (Windows 側 python の回収込み)
+scripts/spp_latency/com_kill.sh
+```
+
+`+0.019 s` 〜 `+0.084 s` のようにミリ秒台で出る行がライブ配信、`+6 s` 前後の行は開く前に
+リングに溜まっていた分。2026-09-01 の実測は n=8 で min 19 / avg 40 / max 84 ms。
+
 ## 5. UART の見方
 
 ```bash
@@ -191,6 +221,13 @@ GEMM elapsed=<n> ms
 - **WSL2 で docker が見つからない**: Docker Desktop → Settings → Resources →
   WSL integration で該当ディストロを有効化してシェルを開き直す。
 - **ブリック**: §4 の復旧経路。慌てて連続書き込みしない。
+- **`[spplog] connected (dup n ignored)`**: 正常。SDK は 1 回の RFCOMM open で CONNECTED を 2 回
+  上げる (`SPPNEW_EVENT_NEW_OPEN` → `SPPNEW_EVENT_OPEN`)。2 回目を無視するのが修正後の仕様。
+  `[spplog] tx timeout, resending (n)` は 5 秒 DATA_SENT が来なかった送信の再送 (at-least-once。
+  受信側に `!! GAP` として重複が見えることがある)。`(0)` のように値が増えていないのに出たら
+  メモリ破壊を疑う (design doc §13.14-3)
+- **`FaultInfo : (MemFault)` + `svcMutexWait`**: ログスレッドのスタック溢れの前歴あり
+  (1024 B → 2048 B で解消、§13.14-3)。`PSP` が `os_thread_def_stack_spp_log_thread` の範囲内なら同件
 
 - **`spp_tail.py` が `PermissionError(13, ..., 5)` で COM を開けない**: WSL から `timeout N powershell.exe ...`
   で起動した前回の Windows 側 `python.exe` が COM を掴んだまま残っている (WSL 側の timeout は

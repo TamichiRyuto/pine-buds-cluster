@@ -1803,7 +1803,7 @@ GEMM のタイミングにも BT スタックにも待ちを持ち込まない�
 リングにも触らない。**
 
 ```c
-osThreadDef(spp_log_thread, osPriorityLow, 1, 1024, "spp_log");  /* cmsis_os.h:165, :347-356 */
+osThreadDef(spp_log_thread, osPriorityLow, 1, 2048, "spp_log");  /* cmsis_os.h:165, :347-356; 当初 1024 → §13.14-3 で 2048 */
 
 enum { SPP_LOG_CHUNK = 512 };          /* < L2CAP_MTU 672 (app_spp.h:29) */
 static char     s_tx_slot[SPP_LOG_CHUNK];
@@ -1889,7 +1889,8 @@ static void spp_log_thread_body(void const *arg)
 1 本は余裕として残す。
 
 メモリ増分: リング 4096 B + TX スロット 512 B + RX 2688 B + スレッドスタック 1024 B +
-状態 ≒ **約 8.3 KB**。§7 の合計 22.7 KB に足しても RAM 残量 (約 330 KB) に対して十分。
+状態 ≒ **約 8.3 KB** (2026-09-01 訂正: スタックは **2048 B**、Run 14 で 1024 B が溢れて
+MemFault。§13.14-3。合計 ≒ 9.3 KB)。§7 の合計 22.7 KB に足しても RAM 残量 (約 330 KB) に対して十分。
 (2026-09-01 実機訂正: 当初 RX 256 B としていたが、Run 5 で
 `_btif_spp_create_channel` が `rx buffer is too small` を ASSERT。スタックの最小要件は
 `SPP_RECV_BUFFER_SIZE` = `L2CAP_MTU*4` = 2688 B — TOTA (`app_spp_tota.cpp:59`) と同じ)
@@ -2230,7 +2231,8 @@ write_scan_enable=2
    **20 ms 以内**に収まる (SPP 送信が計算を乱していない)
 7. **到達遅延** — バッズが行を出してから Windows 側ファイルに現れるまでの目安が
    **1 秒以内**。ログスレッドの周期 200 ms + RFCOMM の sniff 復帰を見込んだ値。
-   厳密な計測はしない (13.11-6)
+   厳密な計測はしない (13.11-6)。
+   (2026-09-01 実測: ライブ配信行で 19〜84 ms、§13.14-2)
 
 条件 2 の照合は、UART ログを `tr -d '\0' | tr '\r' '\n'` で正規化したうえで
 `COMPUTE_TRACE` 由来の行だけを抜き、SPP ログ側の `#<seq> ` を剥がして `diff` する。
@@ -2448,9 +2450,111 @@ Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
     起動したところ、今度は**左バッズ (rank 1)** が応答し `#0`〜`#23` が**欠落・重複なし**で届いた
     (`run-20260901-135303.log`、`!! GAP` 0 回 — §13.9 条件 4 をこのランは満たす)。
     どちらのバッズが応答するかは Windows がどちらの page scan に当たるかで決まる (両側が同じ
-    BD アドレスを広告)。同ランの `[mpi-t1]` は `probe len=512 ok` / `max_payload=512` /
+    BD アドレスを広告)。**→ 訂正 (§13.14-3/4): 応答するのはその時点の IBRT master。**同ランの `[mpi-t1]` は `probe len=512 ok` / `max_payload=512` /
     `rtt n=100 min=44 avg=169 max=407 ms` で、Run 11 (右, `max_payload=4`) より大幅に良い。
     初回チャンクの重複 (6) は再現せず。
+
+### 13.14 初回チャンク重複と `[spplog] connected` 二重の原因 (Run 11/13 解析, 2026-09-01)
+
+§13.13-6 (Run 11 の初回チャンク再送) と §14.4 (`[spplog] connected` が COM6 オープン 1 回で
+2 回出る) は**同じ原因**だった。Run 13 の左右 UART (`~/.claude/handover/artifacts/
+2026-09-01-1430-pinebuds-tap-run/{left,right}-run13-tap.log`) から:
+
+1. **SDK は 1 回の RFCOMM open で `REMDEV_CONNECTED` を 2 回上げる。** 右 UART の並び:
+   ```
+   _btif_sppnew_callback:chnl=0x2004279c,event=1 [SPPNEW_EVENT_NEW_OPEN]
+   [spplog] connected
+   rfcomm_dlc_send:dlci=25,tx_credit=6,len=517          <- 初回チャンク (512 B + RFCOMM 5 B)
+   _btif_sppnew_callback:chnl=0x2004279c,event=0 [SPPNEW_EVENT_OPEN]
+   [spplog] connected                                   <- 2 回目
+   rfcomm_l2cap_notify_callback dlci 25: tx finished.
+   _btif_sppnew_callback:chnl=0x2004279c,event=4 [SPPNEW_EVENT_TX_HANDLED]
+   ```
+   `sppnew.h:30-31` の `SPPNEW_EVENT_OPEN` / `SPPNEW_EVENT_NEW_OPEN` (DLC 確立 → MSC 交換完了) が
+   どちらも `BTIF_SPP_EVENT_REMDEV_CONNECTED` にマップされている。IBRT 由来ではなく、
+   両バッズに 2 回ずつ出るのは両方が同じイベント列を受け取るから (3 参照)。
+2. **重複の機構。** 旧 §13.3.4 のコールバックは CONNECTED で無条件に `s_inflight = 0` にしていた。
+   初回チャンクの `btif_spp_write` が NEW_OPEN と OPEN の間に入ると、OPEN 側の CONNECTED が
+   送信中の in-flight を潰し、ログスレッドは `min(s_done_len, s_inflight_len)` を commit する。
+   `s_done_len` は DATA_SENT がまだ来ていないので**初期値 0** → commit 0 → 同じ base から
+   再 peek → 初回チャンクだけ二重送信。Run 11 の受信ファイルはまさにこの形
+   (`#0`〜`#11` 途中 512 B → `#0` から全量、`!! GAP 11 -> 1` は `#11` の途中に `#0` 行が連結された
+   ため `#11` の次が `#1` に見えた)。Run 12/13 で再現しなかったのは、初回 write が OPEN の後に
+   出た (左 open #1) か、DATA_SENT がスレッドより先に届いた (右 open #1) から。タイミング勝負。
+3. **応答するのは IBRT master。** Run 11 は右 (`current_role:0`) が、Run 12/13 は左が応答した。
+   Run 13 は起動後にロールスイッチが起きて左が master になっている
+   (`tjmLOG…current_role = 0x0` 左 / `0xff`→`IBRT_SLAVE` 右)。§13.13-10 の「page scan に当たった
+   方」は訂正: **モバイルリンクを持つ master のリングが COM6 に出る**。
+4. **slave も CONNECTED を受け取り、リングを虚空へ流している。** Run 13 open #2 で slave の右は
+   `dlci=24` に 517/517/51 B (起動リング全量) とタップ各ランの 51/164/192 B を送り、
+   `TX_HANDLED` も返ってきているが、COM6 側 (`run-20260901-142809.log`) には左 (rank 1) の行しか
+   無い。IBRT の snoop リンクでは slave の TX は電波に乗らず、しかし stack 上は完了扱いなので
+   **slave のリングは commit されて消える**。結果、rank 0 の `GEMM-MPI … PASS` 行は右が master の
+   ときしか PC に届かない (Run 13 では届いていない)。未対処 — §13.15 に選択肢を残す。
+5. **DATA_SENT が永遠に来ない DLC がある。** 左 open #1 (14:26:02) は `dlci=25` に 517 B を送った後
+   `tx finished` も `CLOSE` も来ず、Windows 側の受信ファイルは空。2 分後の open #2 は
+   同じ chnl に `dlci=24` で NEW_OPEN が来た。旧コードは (2) の「CONNECTED で in-flight を潰す」
+   副作用で偶然回復していた (`s_done_len` が 0 だったので再送)。CONNECTED 重複を無視するなら
+   この経路の回復手段が別に要る。
+
+#### 修正 (spp_tx_fsm, tests/test_spp_tx_fsm.cpp F9〜F13)
+
+送信ステートマシンを `firmware/pinebuds_compute/spp_tx_fsm.{h,cpp}` に切り出し (tidy `14aa212`)、
+規則を変えた:
+
+| 規則 | 旧 | 新 |
+|---|---|---|
+| CONNECTED (既に connected) | in-flight を潰す | **無視** (`dup_connected++`、UART は `[spplog] connected (dup n ignored)`) |
+| CONNECTED (新規) / DISCONNECTED | in-flight を潰す、`done_len` はそのまま | in-flight を潰し **`done_len = 0`** → 次の reap は commit 0 = 未確認チャンクをリングから再 peek (at-least-once) |
+| DATA_SENT が来ない | 永遠に待つ | **`SPP_TX_FSM_TIMEOUT_MS` = 5000 ms** で諦めて再送 (`timeouts++`、UART は `[spplog] tx timeout, resending (n)`)。32 bit ms のラップ対応 |
+
+タイムアウトが本当に届いていたチャンクに当たれば受信側で重複が出るが、それは設計どおりの
+at-least-once であり `!! GAP` として見える。5 s は sniff 復帰 (≦1 s 級) と RFCOMM クレジット
+待ちに対して十分な余裕。
+
+#### 実測 (Run 14/15, 2026-09-01 15:2x〜16:1x)
+
+キャプチャは `~/.claude/handover/artifacts/2026-09-01-run14-15-spp-fsm/` (UART 両側の生ログ、
+WSL 時計でタイムスタンプした `uart_ts.log` / `com6_ts*.log`、フォールトダンプ入りの
+`run14/{left,right}.raw`、Windows 側受信ファイル `run-20260901-15*.log`)。
+
+1. **重複 CONNECTED は無視される。** 両バッズとも COM6 オープン 1 回につき UART は
+   `[spplog] connected` 1 回 + `[spplog] connected (dup 1 ignored)` 1 回 (Run 14 open #1/#2、
+   Run 15 で計 6 回全て同じ)。初回チャンクの二重送信は再現せず、COM6 は Run 14 open #1 で
+   右 (master) の `#0`〜`#25`、Run 15 で左 (master) の `#0`〜`#24` を**欠落・重複なし** (`!! GAP` 0)
+   で受信。§13.9 条件 4 ✓。
+2. **遅延 (§13.9 条件 7) = 19〜84 ms。** Run 14 open #1 は起動時ランの途中で COM6 を開いたので
+   `#18`〜`#25` の 8 行がライブ配信になり、UART 到着 → COM6 到着 (どちらも WSL 側の
+   `EPOCHREALTIME`、`scripts/spp_latency/`) が n=8 min=19 avg=40 max=84 ms。
+   1 秒条件を余裕で満たす。開く前にリングに溜まっていた行は当然「経過時間」(6〜8 s) で出る。
+3. **Run 14 の MemFault (回帰、修正済み `d3f1a54`)。** 初回ビルド (ログスレッドのスタック 1024 B)
+   では両バッズが COM6 オープンの数分後に `FaultInfo : (MemFault) / Data access violation /
+   MMFAR=0x44` で落ちた。`PSP=0x2004CF30` はログスレッドのスタック配列
+   (`os_thread_def_stack_spp_log_thread` 0x2004cbbc+0x400) の中、バックトレースは
+   `svcMutexWait (rt_CMSIS.c:1286)`。map ではスタック配列の直下に
+   `os_mutex_cb_spp_log_credit_mutex` (-12 B) / `…_ring_mutex` (-24 B) / `…_mutex` (-36 B) /
+   `s_timeouts_seen` (-40 B) が並ぶ。直前に出た `[spplog] tx timeout, resending (0)` は値が 0 =
+   本物のタイムアウトではなく、壊れた `s_timeouts_seen` との不一致で出た偽陽性。
+   スタックあふれの根拠: ログスレッドの最深経路は `btif_spp_write` → `rfcomm_dlc_send` で
+   SDK 自身の TRACE (printf) がこのスタックで走り、そこへ割り込みが乗ると FPU 付き例外
+   フレーム 104 B が積まれる。旧ビルドも同じ配置・同じ経路だったので元々限界だった
+   (今回の変更でローカル変数が数ワード増えて顕在化)。**2048 B に増やした Run 15 では
+   タイムアウトもフォールトも無し。** §13.3.4 のメモリ見積りは +1 KB (≒ 9.3 KB)。
+4. **応答者は IBRT master (3 の再確認)。** Run 14 は右が master で右のリング、Run 15 は起動後の
+   ロールスイッチで左が master になり左のリングが届いた。slave 側 (Run 15 の右 = rank 0) も
+   `dlci=25` に 517/517/107 B を送って `TX_HANDLED` を受けたが COM6 には現れない (4 の再確認)。
+   つまり **`GEMM-MPI … PASS` 行が PC に出るかどうかは、その起動で右が master になったか次第**。
+5. **タップは検知されず (Run 15)。** 修正ファームでの 5 連タップ再確認は、右・左とも
+   `app_key_single_tap` すら出ず断念 (単タップ 3 回のゆっくりタップも無反応)。Run 13 と
+   起動順序 (`PLUGIN` → `app_key_init`) は同一で、キーは GPIO キー (タッチ IC → GPIO、
+   `tgt_hardware.c`) なのでソフト側の無効化経路は無い。バッズをケースに戻した瞬間には
+   `app_key_single_tap event 8` が出ているのでセンサは生きている。**座った状態でタッチ面に
+   指が届いていない**か個体の感度の問題と見て、タップ経路は Run 13 (§14.4) の実績で足りると
+   判断した (今回の変更はタップ経路に触れていない)。注意: 充電起動のバッズはケースから
+   出すと電源が落ちるので、タップは必ず収めたまま行う (Run 14 で 1 回踏んだ)。
+6. **手順上の学び。** COM6 を開くのは起動時ランの完了後でも途中でもよい (途中なら残りがライブで
+   流れて遅延も測れる)。書き込み後は bestool の finalise で片側ずつ勝手に再起動するので、
+   必ず**左右同時**に再起動し直す (§13.13 落とし穴と同じ)。
 
 ---
 
@@ -2533,7 +2637,7 @@ Run 10/11 のスクラッチパッド。Windows 側の受信ファイルは
   右が後から合流した #2 は 5 ms で、起動時ラン (12 ms) より速い = `app_sysfreq_req(104M)` は
   効いている。#4 の 83 ms は sniff からの復帰待ちと推測。合否条件 (§13.9-6, 20 ms 以内) は
   起動時ランにのみ適用し、タップ再実行は「PASS かつ size=2」を合否とする
-- `[spplog] connected` は COM6 オープン 1 回につき**両バッズ**に 2 回ずつ出た (IBRT が
-  RFCOMM イベントを両側に配っている?)。実害は無いが未調査
+- `[spplog] connected` は COM6 オープン 1 回につき**両バッズ**に 2 回ずつ出た。→ 原因と修正は
+  §13.14 (SDK の `NEW_OPEN`/`OPEN` が両方 CONNECTED になる。初回チャンク重複と同根)
 - 書き込み直後の単独起動 (左) は `FAIL cmd channel down after 20000 ms` → `size=1` の縮退ランで
   完走した。同時再起動後は正常
