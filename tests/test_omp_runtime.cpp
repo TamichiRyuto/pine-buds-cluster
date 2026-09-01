@@ -14,7 +14,7 @@
 // [x] omp_set_num_threads is accepted and ignored (still 1 thread)
 // [x] omp_get_wtime: monotonic non-negative seconds
 // [x] R1 no port: GOMP_parallel runs fn(data) once inline, 1 thread / id 0
-// [ ] R2 port (worker_count 1): max_threads 2, num_procs 2, outside a
+// [x] R2 port (worker_count 1): max_threads 2, num_procs 2, outside a
 //        region num_threads is still 1
 // [ ] R3 team of 2: fn runs twice (worker + inline), worker sees id 1,
 //        inline sees id 0, both see 2 threads, join once after inline
@@ -151,11 +151,37 @@ static void test_r2_port_reports_two_threads_available() {
     omp_set_port(0);
 }
 
+static void test_r3_team_of_two_runs_worker_and_inline() {
+    install_fake_port();
+    int payload = 7;
+    reset_seen();
+
+    GOMP_parallel(&record_fn, &payload, 0, 0);
+
+    // fn ran twice with the same data: once on the (fake) worker, once
+    // inline on the primary, and both saw a team of 2.
+    CHECK(g_seen.calls == 2);
+    CHECK(g_seen.data == &payload);
+    CHECK(g_fake.starts == 1);
+    CHECK(g_seen.num_threads[0] == 2);
+    CHECK(g_seen.num_threads[1] == 2);
+    // The fake worker runs fn synchronously inside worker_start, so call 0
+    // is the worker (id 1) and call 1 is the primary (id 0).
+    CHECK(g_seen.thread_num[0] == 1);
+    CHECK(g_seen.thread_num[1] == 0);
+    // Exactly one join, issued after the primary finished its own share.
+    CHECK(g_fake.joins == 1);
+    CHECK(g_fake.join_seen_calls == 2);
+
+    omp_set_port(0);
+}
+
 int main() {
     RUN_TEST(test_sequential_identity);
     RUN_TEST(test_thread_capacity_is_one);
     RUN_TEST(test_wtime_monotonic);
     RUN_TEST(test_r1_no_port_runs_inline_once);
     RUN_TEST(test_r2_port_reports_two_threads_available);
+    RUN_TEST(test_r3_team_of_two_runs_worker_and_inline);
     return testfw::summary();
 }
